@@ -1,0 +1,56 @@
+[package]
+name = "rust_logger_system"
+version = "0.1.0"
+edition = "2021"
+authors = ["Logger System Team"]
+license = "BSD-3-Clause"
+description = "A production-ready, high-performance Rust logging framework with asynchronous processing and multiple output targets"
+repository = "https://github.com/kcenon/rust_logger_system"
+keywords = ["logging", "async", "logger", "log", "tracing"]
+categories = ["development-tools::debugging"]
+
+[dependencies]
+# Error handling
+thiserror = "2.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Thread safety
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Terminal colors
+colored = { version = "2.1", optional = true }
+
+# File handling
+fs2 = { version = "0.4", optional = true }  # For file locking
+flate2 = "1.0"  # For log compression
+
+# Async support
+async-trait = "0.1"
+tokio = { version = "1.42", features = ["fs", "io-util"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.42", features = ["full"] }
+tokio-test = "0.4"
+criterion = "0.5"
+tempfile = "3.12"
+proptest = "1.4"
+
+[features]
+default = ["async", "console", "file"]
+async = []
+console = ["colored"]
+file = ["fs2"]
+network = []
+async-appenders = ["tokio"]
+all-features = ["async", "console", "file", "network", "async-appenders"]
+
+[[bench]]
+name = "logger_benchmarks"
+harness = false
