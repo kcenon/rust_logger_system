@@ -29,6 +29,7 @@ This is a Rust implementation of the [logger_system](https://github.com/kcenon/l
 - **Overflow Policies**: Configurable behavior when async queue is full (v0.2.0+)
 - **Priority-Based Preservation**: Critical logs (Error, Fatal) are never dropped (v0.2.0+)
 - **Logger Metrics**: Track dropped logs, queue full events, and drop rates (v0.2.0+)
+- **Log Rotation**: Multiple rotation strategies - Size, Time, Daily, Hourly, Hybrid (v0.2.1+)
 
 ## Quick Start
 
@@ -214,6 +215,57 @@ let logger = Logger::builder()
 - **Critical** (Error, Fatal): Never dropped when `preserve_critical=true`
 - **High** (Warn): Retried before dropping when `preserve_high=true`
 - **Normal** (Trace, Debug, Info): Subject to overflow policy
+
+### Log Rotation (v0.2.1+)
+
+Configure automatic log rotation with various strategies:
+
+```rust
+use rust_logger_system::appenders::{RotatingFileAppender, RotationPolicy, RotationStrategy};
+use std::time::Duration;
+
+// Size-based rotation (default behavior)
+let policy = RotationPolicy::new()
+    .with_max_size(100 * 1024 * 1024)  // 100 MB
+    .with_max_backups(7)
+    .with_compression(true);
+let appender = RotatingFileAppender::with_policy("/var/log/app.log", policy)?;
+
+// Time-based rotation (every hour)
+let policy = RotationPolicy::new()
+    .with_strategy(RotationStrategy::Time {
+        interval: Duration::from_secs(3600)
+    })
+    .with_max_backups(24);
+
+// Daily rotation at midnight
+let policy = RotationPolicy::new()
+    .with_strategy(RotationStrategy::Daily { hour: 0 })
+    .with_max_backups(30)
+    .with_compression(true);
+
+// Hourly rotation
+let policy = RotationPolicy::new()
+    .with_strategy(RotationStrategy::Hourly)
+    .with_max_backups(48);
+
+// Hybrid: rotate on size OR time, whichever comes first
+let policy = RotationPolicy::new()
+    .with_strategy(RotationStrategy::Hybrid {
+        max_bytes: 50 * 1024 * 1024,  // 50 MB
+        interval: Duration::from_secs(24 * 3600),  // 24 hours
+    })
+    .with_max_backups(14)
+    .with_compression(true);
+```
+
+**Available Rotation Strategies**:
+- **Size**: Rotate when file exceeds specified bytes
+- **Time**: Rotate at specified time intervals
+- **Daily**: Rotate daily at specified hour (0-23)
+- **Hourly**: Rotate every hour
+- **Hybrid**: Rotate on size OR time, whichever comes first
+- **Never**: Disable rotation (for external rotation management)
 
 ## Performance
 

@@ -1,18 +1,137 @@
 //! Rotating file appender with automatic log rotation
+//!
+//! This module provides a file appender that automatically rotates log files
+//! based on various strategies including size, time, daily, hourly, or hybrid.
 
 use crate::core::appender::Appender;
 use crate::core::error::{LoggerError, Result};
 use crate::core::log_entry::LogEntry;
 use crate::core::timestamp::TimestampFormat;
+use chrono::{DateTime, Local, Timelike};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+/// Rotation strategy defining when to rotate log files
+///
+/// # Examples
+///
+/// ```
+/// use rust_logger_system::appenders::RotationStrategy;
+/// use std::time::Duration;
+///
+/// // Rotate when file exceeds 100 MB
+/// let size_strategy = RotationStrategy::Size { max_bytes: 100 * 1024 * 1024 };
+///
+/// // Rotate every hour
+/// let time_strategy = RotationStrategy::Time { interval: Duration::from_secs(3600) };
+///
+/// // Rotate daily at midnight
+/// let daily_strategy = RotationStrategy::Daily { hour: 0 };
+///
+/// // Rotate on size OR time, whichever comes first
+/// let hybrid_strategy = RotationStrategy::Hybrid {
+///     max_bytes: 50 * 1024 * 1024,
+///     interval: Duration::from_secs(24 * 3600),
+/// };
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub enum RotationStrategy {
+    /// Rotate when file exceeds size in bytes
+    Size { max_bytes: u64 },
+
+    /// Rotate at time interval
+    Time { interval: Duration },
+
+    /// Rotate daily at specified hour (0-23)
+    Daily { hour: u8 },
+
+    /// Rotate hourly
+    Hourly,
+
+    /// Rotate on size OR time, whichever comes first
+    Hybrid { max_bytes: u64, interval: Duration },
+
+    /// No rotation (useful for testing or when external rotation is used)
+    Never,
+}
+
+impl Default for RotationStrategy {
+    fn default() -> Self {
+        RotationStrategy::Size {
+            max_bytes: 10 * 1024 * 1024, // 10 MB
+        }
+    }
+}
+
+impl RotationStrategy {
+    /// Create a size-based rotation strategy
+    #[must_use]
+    pub fn size(max_bytes: u64) -> Self {
+        RotationStrategy::Size { max_bytes }
+    }
+
+    /// Create a time-based rotation strategy
+    #[must_use]
+    pub fn time(interval: Duration) -> Self {
+        RotationStrategy::Time { interval }
+    }
+
+    /// Create a daily rotation strategy
+    ///
+    /// # Panics
+    ///
+    /// Panics if hour is greater than 23
+    #[must_use]
+    pub fn daily(hour: u8) -> Self {
+        assert!(hour <= 23, "Hour must be between 0 and 23");
+        RotationStrategy::Daily { hour }
+    }
+
+    /// Create an hourly rotation strategy
+    #[must_use]
+    pub fn hourly() -> Self {
+        RotationStrategy::Hourly
+    }
+
+    /// Create a hybrid rotation strategy (size OR time)
+    #[must_use]
+    pub fn hybrid(max_bytes: u64, interval: Duration) -> Self {
+        RotationStrategy::Hybrid { max_bytes, interval }
+    }
+
+    /// Create a never-rotate strategy
+    #[must_use]
+    pub fn never() -> Self {
+        RotationStrategy::Never
+    }
+}
 
 /// Configuration for rotating file appender
+///
+/// # Examples
+///
+/// ```
+/// use rust_logger_system::appenders::{RotationPolicy, RotationStrategy};
+/// use std::time::Duration;
+///
+/// // Size-based rotation with compression
+/// let policy = RotationPolicy::new()
+///     .with_strategy(RotationStrategy::Size { max_bytes: 50 * 1024 * 1024 })
+///     .with_max_backups(7)
+///     .with_compression(true);
+///
+/// // Daily rotation at 2 AM
+/// let policy = RotationPolicy::new()
+///     .with_strategy(RotationStrategy::Daily { hour: 2 })
+///     .with_max_backups(30)
+///     .with_compression(true);
+/// ```
 #[derive(Debug, Clone)]
 pub struct RotationPolicy {
-    /// Maximum size of a single log file in bytes
-    pub max_file_size: u64,
+    /// Rotation strategy defining when to rotate
+    pub strategy: RotationStrategy,
     /// Maximum number of rotated files to keep
     pub max_backup_files: usize,
     /// Whether to compress rotated files
@@ -22,7 +141,7 @@ pub struct RotationPolicy {
 impl Default for RotationPolicy {
     fn default() -> Self {
         Self {
-            max_file_size: 10 * 1024 * 1024, // 10 MB
+            strategy: RotationStrategy::default(),
             max_backup_files: 5,
             compress: false,
         }
@@ -30,16 +149,25 @@ impl Default for RotationPolicy {
 }
 
 impl RotationPolicy {
-    /// Create a new rotation policy
+    /// Create a new rotation policy with default settings
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Set maximum file size
+    /// Set the rotation strategy
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn with_strategy(mut self, strategy: RotationStrategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+
+    /// Set maximum file size (convenience method for size-based rotation)
+    ///
+    /// This is equivalent to `with_strategy(RotationStrategy::Size { max_bytes: size })`
     #[must_use = "builder methods return a new value and do not modify the original"]
     pub fn with_max_size(mut self, size: u64) -> Self {
-        self.max_file_size = size;
+        self.strategy = RotationStrategy::Size { max_bytes: size };
         self
     }
 
@@ -56,14 +184,51 @@ impl RotationPolicy {
         self.compress = enabled;
         self
     }
+
+    /// Get the maximum file size if using size-based rotation
+    ///
+    /// Returns `None` if the strategy doesn't include size-based rotation.
+    #[must_use]
+    pub fn max_file_size(&self) -> Option<u64> {
+        match &self.strategy {
+            RotationStrategy::Size { max_bytes } => Some(*max_bytes),
+            RotationStrategy::Hybrid { max_bytes, .. } => Some(*max_bytes),
+            _ => None,
+        }
+    }
 }
 
-/// Rotating file appender
+/// Rotating file appender with support for multiple rotation strategies
+///
+/// # Examples
+///
+/// ```no_run
+/// use rust_logger_system::appenders::{RotatingFileAppender, RotationPolicy, RotationStrategy};
+/// use std::time::Duration;
+///
+/// // Create appender with size-based rotation (default)
+/// let appender = RotatingFileAppender::new("/var/log/app.log").unwrap();
+///
+/// // Create appender with time-based rotation
+/// let policy = RotationPolicy::new()
+///     .with_strategy(RotationStrategy::Time { interval: Duration::from_secs(3600) })
+///     .with_max_backups(24);
+/// let appender = RotatingFileAppender::with_policy("/var/log/app.log", policy).unwrap();
+///
+/// // Create appender with daily rotation at midnight
+/// let policy = RotationPolicy::new()
+///     .with_strategy(RotationStrategy::Daily { hour: 0 })
+///     .with_max_backups(7)
+///     .with_compression(true);
+/// let appender = RotatingFileAppender::with_policy("/var/log/app.log", policy).unwrap();
+/// ```
 pub struct RotatingFileAppender {
     base_path: PathBuf,
     policy: RotationPolicy,
     writer: Option<BufWriter<File>>,
     current_size: u64,
+    /// Timestamp of the last rotation (used for time-based strategies)
+    last_rotation: SystemTime,
     /// Counter for consecutive deletion failures (reset on successful deletion)
     deletion_failure_count: usize,
     /// Timestamp format for log entries
@@ -110,12 +275,15 @@ impl RotatingFileAppender {
                 )
             })?;
 
-        let current_size = file.metadata()
+        let metadata = file.metadata()
             .map_err(|e| LoggerError::file_appender(
                 base_path.display().to_string(),
                 format!("Cannot access file metadata: {}", e)
-            ))?
-            .len();
+            ))?;
+        let current_size = metadata.len();
+
+        // Use file modification time as last rotation time, or current time if unavailable
+        let last_rotation = metadata.modified().unwrap_or_else(|_| SystemTime::now());
         let writer = Some(BufWriter::new(file));
 
         Ok(Self {
@@ -123,6 +291,7 @@ impl RotatingFileAppender {
             policy,
             writer,
             current_size,
+            last_rotation,
             deletion_failure_count: 0,
             timestamp_format: TimestampFormat::default(),
         })
@@ -153,9 +322,44 @@ impl RotatingFileAppender {
         self
     }
 
-    /// Check if rotation is needed
+    /// Check if rotation is needed based on the configured strategy
     fn should_rotate(&self) -> bool {
-        self.current_size >= self.policy.max_file_size
+        match &self.policy.strategy {
+            RotationStrategy::Never => false,
+
+            RotationStrategy::Size { max_bytes } => self.current_size >= *max_bytes,
+
+            RotationStrategy::Time { interval } => {
+                let elapsed = SystemTime::now()
+                    .duration_since(self.last_rotation)
+                    .unwrap_or(Duration::ZERO);
+                elapsed >= *interval
+            }
+
+            RotationStrategy::Daily { hour } => {
+                let now: DateTime<Local> = SystemTime::now().into();
+                let last: DateTime<Local> = self.last_rotation.into();
+
+                // Rotate if we're on a different day and past the target hour
+                now.date_naive() != last.date_naive() && now.hour() >= u32::from(*hour)
+            }
+
+            RotationStrategy::Hourly => {
+                let elapsed = SystemTime::now()
+                    .duration_since(self.last_rotation)
+                    .unwrap_or(Duration::ZERO);
+                elapsed >= Duration::from_secs(3600)
+            }
+
+            RotationStrategy::Hybrid { max_bytes, interval } => {
+                let size_exceeded = self.current_size >= *max_bytes;
+                let time_exceeded = SystemTime::now()
+                    .duration_since(self.last_rotation)
+                    .unwrap_or(Duration::ZERO)
+                    >= *interval;
+                size_exceeded || time_exceeded
+            }
+        }
     }
 
     /// Perform log rotation
@@ -300,6 +504,7 @@ impl RotatingFileAppender {
 
         self.writer = Some(BufWriter::new(file));
         self.current_size = 0;
+        self.last_rotation = SystemTime::now();
 
         Ok(())
     }
@@ -438,8 +643,20 @@ impl RotatingFileAppender {
         &self.policy
     }
 
+    /// Get the timestamp of the last rotation
+    #[must_use]
+    pub fn last_rotation(&self) -> SystemTime {
+        self.last_rotation
+    }
+
+    /// Get the rotation strategy
+    #[must_use]
+    pub fn strategy(&self) -> &RotationStrategy {
+        &self.policy.strategy
+    }
+
     /// Try to reopen the log file (used for recovery after rotation failure)
-    fn try_reopen_file(path: &Path) -> Result<(File, u64)> {
+    fn try_reopen_file(path: &Path) -> Result<(File, u64, SystemTime)> {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -451,13 +668,14 @@ impl RotatingFileAppender {
                 )
             })?;
 
-        let size = file.metadata()
+        let metadata = file.metadata()
             .map_err(|e| LoggerError::file_appender(
                 path.display().to_string(),
                 format!("Cannot access file metadata after reopen: {}", e)
-            ))?
-            .len();
-        Ok((file, size))
+            ))?;
+        let size = metadata.len();
+        let last_rotation = metadata.modified().unwrap_or_else(|_| SystemTime::now());
+        Ok((file, size, last_rotation))
     }
 }
 
@@ -480,9 +698,10 @@ impl Appender for RotatingFileAppender {
                 // Try to reopen the file if writer is missing
                 if self.writer.is_none() {
                     match Self::try_reopen_file(&self.base_path) {
-                        Ok((file, size)) => {
+                        Ok((file, size, last_rotation)) => {
                             self.writer = Some(BufWriter::new(file));
                             self.current_size = size;
+                            self.last_rotation = last_rotation;
                         }
                         Err(reopen_err) => {
                             eprintln!(
@@ -550,7 +769,52 @@ mod tests {
     use super::*;
     use crate::core::log_level::LogLevel;
     use std::fs;
+    use std::thread;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_rotation_strategy_constructors() {
+        // Size-based
+        let strategy = RotationStrategy::size(1024);
+        assert_eq!(strategy, RotationStrategy::Size { max_bytes: 1024 });
+
+        // Time-based
+        let strategy = RotationStrategy::time(Duration::from_secs(3600));
+        assert_eq!(
+            strategy,
+            RotationStrategy::Time {
+                interval: Duration::from_secs(3600)
+            }
+        );
+
+        // Daily
+        let strategy = RotationStrategy::daily(2);
+        assert_eq!(strategy, RotationStrategy::Daily { hour: 2 });
+
+        // Hourly
+        let strategy = RotationStrategy::hourly();
+        assert_eq!(strategy, RotationStrategy::Hourly);
+
+        // Hybrid
+        let strategy = RotationStrategy::hybrid(1024, Duration::from_secs(3600));
+        assert_eq!(
+            strategy,
+            RotationStrategy::Hybrid {
+                max_bytes: 1024,
+                interval: Duration::from_secs(3600)
+            }
+        );
+
+        // Never
+        let strategy = RotationStrategy::never();
+        assert_eq!(strategy, RotationStrategy::Never);
+    }
+
+    #[test]
+    #[should_panic(expected = "Hour must be between 0 and 23")]
+    fn test_daily_strategy_invalid_hour() {
+        let _ = RotationStrategy::daily(24);
+    }
 
     #[test]
     fn test_rotation_policy_builder() {
@@ -559,9 +823,39 @@ mod tests {
             .with_max_backups(3)
             .with_compression(true);
 
-        assert_eq!(policy.max_file_size, 1024);
+        assert_eq!(policy.max_file_size(), Some(1024));
         assert_eq!(policy.max_backup_files, 3);
         assert!(policy.compress);
+        assert_eq!(
+            policy.strategy,
+            RotationStrategy::Size { max_bytes: 1024 }
+        );
+    }
+
+    #[test]
+    fn test_rotation_policy_with_strategy() {
+        let policy = RotationPolicy::new()
+            .with_strategy(RotationStrategy::Daily { hour: 0 })
+            .with_max_backups(7)
+            .with_compression(true);
+
+        assert_eq!(policy.strategy, RotationStrategy::Daily { hour: 0 });
+        assert_eq!(policy.max_backup_files, 7);
+        assert!(policy.compress);
+        assert_eq!(policy.max_file_size(), None);
+    }
+
+    #[test]
+    fn test_rotation_policy_hybrid_strategy() {
+        let policy = RotationPolicy::new()
+            .with_strategy(RotationStrategy::Hybrid {
+                max_bytes: 50 * 1024 * 1024,
+                interval: Duration::from_secs(24 * 3600),
+            })
+            .with_max_backups(14);
+
+        assert_eq!(policy.max_file_size(), Some(50 * 1024 * 1024));
+        assert_eq!(policy.max_backup_files, 14);
     }
 
     #[test]
@@ -578,7 +872,7 @@ mod tests {
     }
 
     #[test]
-    fn test_log_rotation() {
+    fn test_log_rotation_size_based() {
         let dir = tempdir().unwrap();
         let log_path = dir.path().join("rotation.log");
 
@@ -591,10 +885,7 @@ mod tests {
 
         // Write entries until rotation occurs
         for i in 0..20 {
-            let entry = LogEntry::new(
-                LogLevel::Info,
-                format!("Test message number {}", i),
-            );
+            let entry = LogEntry::new(LogLevel::Info, format!("Test message number {}", i));
             appender.append(&entry).unwrap();
         }
 
@@ -606,22 +897,102 @@ mod tests {
     }
 
     #[test]
+    fn test_log_rotation_time_based() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("time_rotation.log");
+
+        // Create policy with very short time interval for testing
+        let policy = RotationPolicy::new()
+            .with_strategy(RotationStrategy::Time {
+                interval: Duration::from_millis(50),
+            })
+            .with_max_backups(3);
+
+        let mut appender = RotatingFileAppender::with_policy(&log_path, policy).unwrap();
+
+        // Write initial entry
+        let entry = LogEntry::new(LogLevel::Info, "Initial message".to_string());
+        appender.append(&entry).unwrap();
+        appender.flush().unwrap();
+
+        // Wait for time interval to elapse
+        thread::sleep(Duration::from_millis(60));
+
+        // Write another entry - should trigger rotation
+        let entry = LogEntry::new(LogLevel::Info, "After interval".to_string());
+        appender.append(&entry).unwrap();
+        appender.flush().unwrap();
+
+        // Check that backup file exists
+        let backup1 = log_path.with_file_name("time_rotation.log.1");
+        assert!(backup1.exists() || log_path.with_file_name("time_rotation.log.1.gz").exists());
+    }
+
+    #[test]
+    fn test_log_rotation_hybrid() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("hybrid_rotation.log");
+
+        // Create policy with hybrid strategy
+        let policy = RotationPolicy::new()
+            .with_strategy(RotationStrategy::Hybrid {
+                max_bytes: 100,
+                interval: Duration::from_secs(3600), // Long interval, won't trigger
+            })
+            .with_max_backups(3);
+
+        let mut appender = RotatingFileAppender::with_policy(&log_path, policy).unwrap();
+
+        // Write entries until size-based rotation occurs
+        for i in 0..20 {
+            let entry = LogEntry::new(LogLevel::Info, format!("Test message number {}", i));
+            appender.append(&entry).unwrap();
+        }
+
+        appender.flush().unwrap();
+
+        // Check that backup file exists (triggered by size)
+        let backup1 = log_path.with_file_name("hybrid_rotation.log.1");
+        assert!(backup1.exists() || log_path.with_file_name("hybrid_rotation.log.1.gz").exists());
+    }
+
+    #[test]
+    fn test_no_rotation_with_never_strategy() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("never_rotation.log");
+
+        let policy = RotationPolicy::new()
+            .with_strategy(RotationStrategy::Never)
+            .with_max_backups(3);
+
+        let mut appender = RotatingFileAppender::with_policy(&log_path, policy).unwrap();
+
+        // Write many entries
+        for i in 0..100 {
+            let entry = LogEntry::new(LogLevel::Info, format!("Test message number {}", i));
+            appender.append(&entry).unwrap();
+        }
+
+        appender.flush().unwrap();
+
+        // Check that no backup files exist
+        let backup1 = log_path.with_file_name("never_rotation.log.1");
+        assert!(!backup1.exists());
+        assert!(!log_path.with_file_name("never_rotation.log.1.gz").exists());
+    }
+
+    #[test]
     fn test_multiple_rotations() {
         let dir = tempdir().unwrap();
         let log_path = dir.path().join("multi.log");
 
-        let policy = RotationPolicy::new()
-            .with_max_size(50)
-            .with_max_backups(2);
+        let policy = RotationPolicy::new().with_max_size(50).with_max_backups(2);
 
         let mut appender = RotatingFileAppender::with_policy(&log_path, policy).unwrap();
 
         // Write enough to cause multiple rotations
         for i in 0..100 {
-            let entry = LogEntry::new(
-                LogLevel::Info,
-                format!("Entry {}", i),
-            );
+            let entry = LogEntry::new(LogLevel::Info, format!("Entry {}", i));
             appender.append(&entry).unwrap();
         }
 
@@ -631,14 +1002,49 @@ mod tests {
         let log_files = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_str()
-                    .unwrap()
-                    .starts_with("multi.log")
-            })
+            .filter(|e| e.file_name().to_str().unwrap().starts_with("multi.log"))
             .count();
 
         assert!(log_files <= 3); // current + 2 backups
+    }
+
+    #[test]
+    fn test_last_rotation_getter() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+
+        let appender = RotatingFileAppender::new(&log_path).unwrap();
+        let last_rotation = appender.last_rotation();
+
+        // Last rotation should be close to now (within a few seconds)
+        let elapsed = SystemTime::now()
+            .duration_since(last_rotation)
+            .unwrap_or(Duration::ZERO);
+        assert!(elapsed < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_strategy_getter() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+
+        let policy = RotationPolicy::new()
+            .with_strategy(RotationStrategy::Hourly)
+            .with_max_backups(24);
+
+        let appender = RotatingFileAppender::with_policy(&log_path, policy).unwrap();
+
+        assert_eq!(appender.strategy(), &RotationStrategy::Hourly);
+    }
+
+    #[test]
+    fn test_default_strategy() {
+        let default = RotationStrategy::default();
+        assert_eq!(
+            default,
+            RotationStrategy::Size {
+                max_bytes: 10 * 1024 * 1024
+            }
+        );
     }
 }
