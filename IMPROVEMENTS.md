@@ -703,6 +703,13 @@ let logger = Logger::with_config(LoggerConfig {
 - [x] Add overflow alerts (on_overflow callback and stderr warnings)
 - [x] Test all overflow scenarios
 - [x] Add priority-based preservation (Critical logs never dropped)
+- [x] Add PriorityConfig for configurable priority behavior:
+  - `preserve_critical`: Control whether Error/Fatal are force-written
+  - `preserve_high`: Enable retry mechanism for Warn logs
+  - `block_on_critical`: Control blocking behavior for critical logs
+  - `high_priority_retry_count`: Configurable retry attempts for high priority
+- [x] Add stress tests for priority preservation under load
+- [x] Update documentation with PriorityConfig examples
 
 ### Phase 2: Formatting and Standards (Sprint 2)
 - [ ] Add standard timestamp formats
