@@ -18,17 +18,18 @@ pub mod prelude {
     pub use crate::appenders::{ConsoleAppender, FileAppender};
     pub use crate::core::{
         Appender, ContextGuard, FieldValue, FormatterConfig, LogContext, LogEntry, LogLevel,
-        Logger, LoggerBuilder, LoggerContext, LoggerError, LoggerMetrics, LogPriority,
-        OutputFormat, OverflowCallback, OverflowPolicy, PriorityConfig, Result,
-        StructuredLogBuilder, StructuredLogEntry, TimestampFormat, TracingContext,
+        LogSampler, Logger, LoggerBuilder, LoggerContext, LoggerError, LoggerMetrics, LogPriority,
+        OutputFormat, OverflowCallback, OverflowPolicy, PriorityConfig, Result, SamplerMetrics,
+        SamplingConfig, StructuredLogBuilder, StructuredLogEntry, TimestampFormat, TracingContext,
         DEFAULT_SHUTDOWN_TIMEOUT,
     };
 }
 
 pub use appenders::{ConsoleAppender, FileAppender};
 pub use core::{
-    Appender, ContextGuard, FieldValue, FormatterConfig, LogContext, LogEntry, LogLevel, Logger,
-    LoggerBuilder, LoggerContext, LoggerError, LoggerMetrics, LogPriority, OutputFormat,
-    OverflowCallback, OverflowPolicy, PriorityConfig, Result, StructuredLogBuilder,
-    StructuredLogEntry, TimestampFormat, TracingContext, DEFAULT_SHUTDOWN_TIMEOUT,
+    Appender, ContextGuard, FieldValue, FormatterConfig, LogContext, LogEntry, LogLevel,
+    LogSampler, Logger, LoggerBuilder, LoggerContext, LoggerError, LoggerMetrics, LogPriority,
+    OutputFormat, OverflowCallback, OverflowPolicy, PriorityConfig, Result, SamplerMetrics,
+    SamplingConfig, StructuredLogBuilder, StructuredLogEntry, TimestampFormat, TracingContext,
+    DEFAULT_SHUTDOWN_TIMEOUT,
 };
