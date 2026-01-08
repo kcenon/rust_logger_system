@@ -103,6 +103,80 @@ impl fmt::Display for LogPriority {
 /// The parameter is the total count of dropped logs so far.
 pub type OverflowCallback = Arc<dyn Fn(u64) + Send + Sync>;
 
+/// Configuration for priority-based log preservation
+///
+/// This configuration allows customization of how different log priorities
+/// are handled when the async queue is full.
+///
+/// # Example
+///
+/// ```
+/// use rust_logger_system::PriorityConfig;
+///
+/// let config = PriorityConfig::default();
+/// assert!(config.preserve_critical);
+/// assert!(config.preserve_high);
+///
+/// // Custom configuration
+/// let config = PriorityConfig {
+///     preserve_critical: true,
+///     preserve_high: true,
+///     block_on_critical: true,
+///     high_priority_retry_count: 3,
+/// };
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriorityConfig {
+    /// Whether to preserve critical logs (Error, Fatal) - never drop them
+    ///
+    /// When true, critical logs are written synchronously if the queue is full.
+    /// Default: true
+    pub preserve_critical: bool,
+
+    /// Whether to preserve high priority logs (Warn) when possible
+    ///
+    /// When true, high priority logs get additional retry attempts before dropping.
+    /// Default: true
+    pub preserve_high: bool,
+
+    /// Whether to block the calling thread for critical logs when queue is full
+    ///
+    /// When true (default), critical logs will block until they can be written.
+    /// When false, critical logs are written synchronously but don't block the sender.
+    /// Default: true
+    pub block_on_critical: bool,
+
+    /// Number of retry attempts for high priority logs before applying overflow policy
+    ///
+    /// Only used when `preserve_high` is true.
+    /// Default: 3
+    pub high_priority_retry_count: u32,
+}
+
+impl Default for PriorityConfig {
+    fn default() -> Self {
+        Self {
+            preserve_critical: true,
+            preserve_high: true,
+            block_on_critical: true,
+            high_priority_retry_count: 3,
+        }
+    }
+}
+
+impl fmt::Display for PriorityConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "PriorityConfig {{ preserve_critical: {}, preserve_high: {}, block_on_critical: {}, high_priority_retry_count: {} }}",
+            self.preserve_critical,
+            self.preserve_high,
+            self.block_on_critical,
+            self.high_priority_retry_count
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +209,38 @@ mod tests {
     #[test]
     fn test_log_priority_default() {
         assert_eq!(LogPriority::default(), LogPriority::Normal);
+    }
+
+    #[test]
+    fn test_priority_config_default() {
+        let config = PriorityConfig::default();
+        assert!(config.preserve_critical);
+        assert!(config.preserve_high);
+        assert!(config.block_on_critical);
+        assert_eq!(config.high_priority_retry_count, 3);
+    }
+
+    #[test]
+    fn test_priority_config_display() {
+        let config = PriorityConfig::default();
+        let display = config.to_string();
+        assert!(display.contains("preserve_critical: true"));
+        assert!(display.contains("preserve_high: true"));
+        assert!(display.contains("block_on_critical: true"));
+        assert!(display.contains("high_priority_retry_count: 3"));
+    }
+
+    #[test]
+    fn test_priority_config_custom() {
+        let config = PriorityConfig {
+            preserve_critical: true,
+            preserve_high: false,
+            block_on_critical: false,
+            high_priority_retry_count: 5,
+        };
+        assert!(config.preserve_critical);
+        assert!(!config.preserve_high);
+        assert!(!config.block_on_critical);
+        assert_eq!(config.high_priority_retry_count, 5);
     }
 }

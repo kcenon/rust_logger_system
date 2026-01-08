@@ -7,7 +7,7 @@ use super::{
     log_entry::LogEntry,
     log_level::LogLevel,
     metrics::LoggerMetrics,
-    overflow_policy::{LogPriority, OverflowCallback, OverflowPolicy},
+    overflow_policy::{LogPriority, OverflowCallback, OverflowPolicy, PriorityConfig},
 };
 use crossbeam_channel::{bounded, Sender, TrySendError};
 use parking_lot::RwLock;
@@ -32,6 +32,8 @@ pub struct Logger {
     overflow_policy: OverflowPolicy,
     /// Optional callback for overflow notifications
     on_overflow: Option<OverflowCallback>,
+    /// Configuration for priority-based log preservation
+    priority_config: PriorityConfig,
 }
 
 impl Logger {
@@ -45,12 +47,18 @@ impl Logger {
             metrics: Arc::new(LoggerMetrics::new()),
             overflow_policy: OverflowPolicy::AlertAndDrop,
             on_overflow: None,
+            priority_config: PriorityConfig::default(),
         }
     }
 
     #[must_use]
     pub fn with_async(buffer_size: usize) -> Self {
-        Self::with_async_config(buffer_size, OverflowPolicy::AlertAndDrop, None)
+        Self::with_async_config(
+            buffer_size,
+            OverflowPolicy::AlertAndDrop,
+            None,
+            PriorityConfig::default(),
+        )
     }
 
     /// Create an async logger with custom overflow configuration
@@ -59,6 +67,7 @@ impl Logger {
         buffer_size: usize,
         overflow_policy: OverflowPolicy,
         on_overflow: Option<OverflowCallback>,
+        priority_config: PriorityConfig,
     ) -> Self {
         let (sender, receiver) = bounded(buffer_size);
         let appenders: Arc<RwLock<Vec<Box<dyn Appender>>>> = Arc::new(RwLock::new(Vec::new()));
@@ -126,6 +135,7 @@ impl Logger {
             metrics,
             overflow_policy,
             on_overflow,
+            priority_config,
         }
     }
 
@@ -316,9 +326,19 @@ impl Logger {
     fn handle_overflow(&self, entry: LogEntry, priority: LogPriority) {
         self.metrics.record_queue_full();
 
-        // Critical logs (Error, Fatal) are never dropped - force write synchronously
-        if priority == LogPriority::Critical {
+        // Handle Critical priority logs (Error, Fatal)
+        if priority == LogPriority::Critical && self.priority_config.preserve_critical {
             self.force_write_critical(entry);
+            return;
+        }
+
+        // Handle High priority logs (Warn) with retry
+        if priority == LogPriority::High && self.priority_config.preserve_high {
+            if self.retry_high_priority(entry) {
+                return;
+            }
+            // If retry failed, continue to normal overflow handling below
+            // (entry was consumed by retry_high_priority)
             return;
         }
 
@@ -367,17 +387,53 @@ impl Logger {
         }
     }
 
+    /// Retry sending a high priority log entry with configurable retry count
+    ///
+    /// Returns true if the entry was successfully sent or written synchronously.
+    fn retry_high_priority(&self, entry: LogEntry) -> bool {
+        if let Some(ref sender) = self.sender {
+            let retry_count = self.priority_config.high_priority_retry_count;
+            let retry_delay = Duration::from_micros(100);
+
+            for _ in 0..retry_count {
+                match sender.try_send(entry.clone()) {
+                    Ok(()) => {
+                        self.metrics.record_critical_preserved(); // Reuse metric for high priority
+                        return true;
+                    }
+                    Err(TrySendError::Full(_)) => {
+                        // Brief pause before retry
+                        thread::sleep(retry_delay);
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        return false; // Logger shutting down
+                    }
+                }
+            }
+
+            // All retries failed, apply overflow policy
+            self.alert_and_drop(entry, false);
+        }
+        true // Entry was handled (either sent or dropped with alert)
+    }
+
     /// Force write a critical log entry synchronously
     fn force_write_critical(&self, entry: LogEntry) {
         self.metrics.record_critical_preserved();
 
-        // Try non-blocking lock first
-        if let Some(mut appenders) = self.appenders.try_write() {
-            Self::process_sync(&mut appenders, &entry, &self.metrics);
-        } else {
-            // For critical logs, we block to ensure they're written
+        if self.priority_config.block_on_critical {
+            // Block to ensure critical logs are written
             let mut appenders = self.appenders.write();
             Self::process_sync(&mut appenders, &entry, &self.metrics);
+        } else {
+            // Try non-blocking lock first
+            if let Some(mut appenders) = self.appenders.try_write() {
+                Self::process_sync(&mut appenders, &entry, &self.metrics);
+            } else {
+                // Fallback: still block for critical logs to ensure they're written
+                let mut appenders = self.appenders.write();
+                Self::process_sync(&mut appenders, &entry, &self.metrics);
+            }
         }
     }
 
@@ -679,6 +735,7 @@ pub struct LoggerBuilder {
     async_buffer: Option<usize>,
     overflow_policy: OverflowPolicy,
     on_overflow: Option<OverflowCallback>,
+    priority_config: PriorityConfig,
 }
 
 impl LoggerBuilder {
@@ -690,6 +747,7 @@ impl LoggerBuilder {
             async_buffer: None,
             overflow_policy: OverflowPolicy::AlertAndDrop,
             on_overflow: None,
+            priority_config: PriorityConfig::default(),
         }
     }
 
@@ -762,12 +820,44 @@ impl LoggerBuilder {
         self
     }
 
+    /// Set the priority configuration for log preservation
+    ///
+    /// Controls how different priority levels are handled during queue overflow.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rust_logger_system::prelude::*;
+    ///
+    /// let logger = Logger::builder()
+    ///     .async_mode(100)
+    ///     .priority_config(PriorityConfig {
+    ///         preserve_critical: true,
+    ///         preserve_high: true,
+    ///         block_on_critical: true,
+    ///         high_priority_retry_count: 5,
+    ///     })
+    ///     .build();
+    /// ```
+    #[must_use = "builder methods return a new value"]
+    pub fn priority_config(mut self, config: PriorityConfig) -> Self {
+        self.priority_config = config;
+        self
+    }
+
     /// Build the Logger
     pub fn build(self) -> Logger {
         let mut logger = if let Some(size) = self.async_buffer {
-            Logger::with_async_config(size, self.overflow_policy, self.on_overflow)
+            Logger::with_async_config(
+                size,
+                self.overflow_policy,
+                self.on_overflow,
+                self.priority_config,
+            )
         } else {
-            Logger::new()
+            let mut l = Logger::new();
+            l.priority_config = self.priority_config;
+            l
         };
 
         logger.set_min_level(self.min_level);
