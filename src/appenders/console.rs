@@ -1,11 +1,12 @@
 //! Console appender implementation
 
-use crate::core::{Appender, LogEntry, LogLevel, Result, TimestampFormat};
+use crate::core::{Appender, LogEntry, LogLevel, OutputFormat, Result, TimestampFormat};
 use colored::Colorize;
 
 pub struct ConsoleAppender {
     use_colors: bool,
     timestamp_format: TimestampFormat,
+    output_format: OutputFormat,
 }
 
 impl ConsoleAppender {
@@ -13,6 +14,7 @@ impl ConsoleAppender {
         Self {
             use_colors: true,
             timestamp_format: TimestampFormat::default(),
+            output_format: OutputFormat::default(),
         }
     }
 
@@ -20,7 +22,25 @@ impl ConsoleAppender {
         Self {
             use_colors,
             timestamp_format: TimestampFormat::default(),
+            output_format: OutputFormat::default(),
         }
+    }
+
+    /// Set the output format for this appender
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rust_logger_system::appenders::ConsoleAppender;
+    /// use rust_logger_system::OutputFormat;
+    ///
+    /// let appender = ConsoleAppender::new()
+    ///     .with_output_format(OutputFormat::Json);
+    /// ```
+    #[must_use]
+    pub fn with_output_format(mut self, format: OutputFormat) -> Self {
+        self.output_format = format;
+        self
     }
 
     /// Set the timestamp format for this appender
@@ -65,23 +85,12 @@ impl Default for ConsoleAppender {
 
 impl Appender for ConsoleAppender {
     fn append(&mut self, entry: &LogEntry) -> Result<()> {
-        let level_str = if self.use_colors {
-            format!("{:5}", entry.level.to_str())
-                .color(entry.level.color_code())
-                .to_string()
-        } else {
-            format!("{:5}", entry.level.to_str())
+        let output = match self.output_format {
+            OutputFormat::Text => self.format_text(entry),
+            OutputFormat::Json | OutputFormat::Logfmt => {
+                self.output_format.format(entry, &self.timestamp_format)
+            }
         };
-
-        let timestamp_str = self.timestamp_format.format(&entry.timestamp);
-
-        let output = format!(
-            "[{}] [{}] {} - {}",
-            timestamp_str,
-            level_str,
-            entry.thread_name.as_ref().unwrap_or(&entry.thread_id),
-            entry.message
-        );
 
         // Route Error and Fatal levels to stderr, others to stdout
         match entry.level {
@@ -101,5 +110,37 @@ impl Appender for ConsoleAppender {
 
     fn name(&self) -> &str {
         "console"
+    }
+}
+
+impl ConsoleAppender {
+    /// Format as text with optional colors
+    fn format_text(&self, entry: &LogEntry) -> String {
+        let level_str = if self.use_colors {
+            format!("{:5}", entry.level.to_str())
+                .color(entry.level.color_code())
+                .to_string()
+        } else {
+            format!("{:5}", entry.level.to_str())
+        };
+
+        let timestamp_str = self.timestamp_format.format(&entry.timestamp);
+
+        let base = format!(
+            "[{}] [{}] {} - {}",
+            timestamp_str,
+            level_str,
+            entry.thread_name.as_ref().unwrap_or(&entry.thread_id),
+            entry.message
+        );
+
+        // Append context fields if present
+        if let Some(ref context) = entry.context {
+            if !context.is_empty() {
+                return format!("{} {}", base, context.format_fields());
+            }
+        }
+
+        base
     }
 }

@@ -202,7 +202,6 @@ impl Logger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::appenders::ConsoleAppender;
 
     #[test]
     fn test_structured_builder_basic() {
