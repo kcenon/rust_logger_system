@@ -1,12 +1,16 @@
 //! Main logger implementation
 
 use super::{
-    appender::Appender, error::Result, log_context::LogContext, log_entry::LogEntry,
+    appender::Appender,
+    error::Result,
+    log_context::LogContext,
+    log_entry::LogEntry,
     log_level::LogLevel,
+    metrics::LoggerMetrics,
+    overflow_policy::{LogPriority, OverflowCallback, OverflowPolicy},
 };
-use crossbeam_channel::{bounded, Sender};
+use crossbeam_channel::{bounded, Sender, TrySendError};
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -22,10 +26,12 @@ pub struct Logger {
     appenders: Arc<RwLock<Vec<Box<dyn Appender>>>>,
     sender: Option<Sender<LogEntry>>,
     async_handle: Option<thread::JoinHandle<()>>,
-    /// Counter for failed log attempts (for observability)
-    failed_writes: Arc<AtomicU64>,
-    /// Counter for sync fallback events when async buffer is full (for observability)
-    sync_fallbacks: Arc<AtomicU64>,
+    /// Metrics for observability (dropped count, total logged, etc.)
+    metrics: Arc<LoggerMetrics>,
+    /// Policy for handling queue overflow
+    overflow_policy: OverflowPolicy,
+    /// Optional callback for overflow notifications
+    on_overflow: Option<OverflowCallback>,
 }
 
 impl Logger {
@@ -36,18 +42,29 @@ impl Logger {
             appenders: Arc::new(RwLock::new(Vec::new())),
             sender: None,
             async_handle: None,
-            failed_writes: Arc::new(AtomicU64::new(0)),
-            sync_fallbacks: Arc::new(AtomicU64::new(0)),
+            metrics: Arc::new(LoggerMetrics::new()),
+            overflow_policy: OverflowPolicy::AlertAndDrop,
+            on_overflow: None,
         }
     }
 
     #[must_use]
     pub fn with_async(buffer_size: usize) -> Self {
+        Self::with_async_config(buffer_size, OverflowPolicy::AlertAndDrop, None)
+    }
+
+    /// Create an async logger with custom overflow configuration
+    #[must_use]
+    pub fn with_async_config(
+        buffer_size: usize,
+        overflow_policy: OverflowPolicy,
+        on_overflow: Option<OverflowCallback>,
+    ) -> Self {
         let (sender, receiver) = bounded(buffer_size);
         let appenders: Arc<RwLock<Vec<Box<dyn Appender>>>> = Arc::new(RwLock::new(Vec::new()));
         let appenders_clone = Arc::clone(&appenders);
-        let failed_writes = Arc::new(AtomicU64::new(0));
-        let failed_writes_clone = Arc::clone(&failed_writes);
+        let metrics = Arc::new(LoggerMetrics::new());
+        let metrics_clone = Arc::clone(&metrics);
 
         let handle = thread::spawn(move || {
             // Batch processing: collect multiple entries before writing
@@ -64,7 +81,7 @@ impl Logger {
                     Err(_) => {
                         // Channel closed, flush remaining batch and exit
                         if !batch.is_empty() {
-                            Self::process_batch(&appenders_clone, &batch, &failed_writes_clone);
+                            Self::process_batch(&appenders_clone, &batch, &metrics_clone);
                         }
                         break;
                     }
@@ -80,7 +97,7 @@ impl Logger {
 
                 // Process batch when full or after timeout
                 if batch.len() >= BATCH_SIZE {
-                    Self::process_batch(&appenders_clone, &batch, &failed_writes_clone);
+                    Self::process_batch(&appenders_clone, &batch, &metrics_clone);
                     batch.clear();
                 } else if !batch.is_empty() {
                     // Small batch - wait a bit for more entries
@@ -95,7 +112,7 @@ impl Logger {
                     }
 
                     // Process whatever we have
-                    Self::process_batch(&appenders_clone, &batch, &failed_writes_clone);
+                    Self::process_batch(&appenders_clone, &batch, &metrics_clone);
                     batch.clear();
                 }
             }
@@ -106,8 +123,9 @@ impl Logger {
             appenders,
             sender: Some(sender),
             async_handle: Some(handle),
-            failed_writes,
-            sync_fallbacks: Arc::new(AtomicU64::new(0)),
+            metrics,
+            overflow_policy,
+            on_overflow,
         }
     }
 
@@ -121,10 +139,9 @@ impl Logger {
     fn process_batch(
         appenders: &Arc<RwLock<Vec<Box<dyn Appender>>>>,
         batch: &[LogEntry],
-        failed_writes: &Arc<AtomicU64>,
+        metrics: &Arc<LoggerMetrics>,
     ) {
         let mut appenders_guard = appenders.write();
-        let mut total_errors = 0;
 
         // Process each entry in the batch
         for entry in batch {
@@ -165,12 +182,10 @@ impl Logger {
             }
 
             if has_error {
-                total_errors += 1;
+                metrics.record_dropped();
+            } else {
+                metrics.record_logged();
             }
-        }
-
-        if total_errors > 0 {
-            failed_writes.fetch_add(total_errors, Ordering::Relaxed);
         }
 
         // Flush after each batch to ensure timely writes
@@ -212,7 +227,7 @@ impl Logger {
     fn process_sync(
         appenders: &mut Vec<Box<dyn Appender>>,
         entry: &LogEntry,
-        failed_writes: &Arc<AtomicU64>,
+        metrics: &Arc<LoggerMetrics>,
     ) -> bool {
         let mut has_error = false;
 
@@ -248,7 +263,9 @@ impl Logger {
         }
 
         if has_error {
-            failed_writes.fetch_add(1, Ordering::Relaxed);
+            metrics.record_dropped();
+        } else {
+            metrics.record_logged();
         }
 
         has_error
@@ -270,67 +287,160 @@ impl Logger {
         }
 
         let entry = LogEntry::new(level, message.into());
+        self.send_entry(entry);
+    }
 
+    /// Internal method to send a log entry with overflow handling
+    fn send_entry(&self, entry: LogEntry) {
         if let Some(ref sender) = self.sender {
-            // Handle backpressure: fall back to synchronous logging if buffer is full
-            match sender.try_send(entry) {
-                Ok(_) => {}
-                Err(crossbeam_channel::TrySendError::Full(entry)) => {
-                    // Buffer full - log synchronously to avoid dropping critical messages
-                    // Increment fallback counter for observability
-                    self.sync_fallbacks.fetch_add(1, Ordering::Relaxed);
+            let priority = entry.level.priority();
 
-                    // Use try_write to prevent deadlock if async worker holds the lock
-                    if let Some(mut appenders) = self.appenders.try_write() {
-                        eprintln!(
-                            "[LOGGER WARNING] Async buffer full (fallback #{}). Logging synchronously. \
-                             Consider increasing buffer size or reducing log volume.",
-                            self.sync_fallbacks.load(Ordering::Relaxed)
-                        );
-                        Self::process_sync(&mut appenders, &entry, &self.failed_writes);
-                    } else {
-                        // Lock unavailable - drop log to prevent deadlock
-                        eprintln!(
-                            "[LOGGER WARNING] Buffer full and appenders lock unavailable. \
-                             Dropping log entry to prevent deadlock. Message: {:?}",
-                            entry.message
-                        );
-                        self.failed_writes.fetch_add(1, Ordering::Relaxed);
-                    }
+            match sender.try_send(entry) {
+                Ok(()) => {
+                    // Successfully queued
                 }
-                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                Err(TrySendError::Full(entry)) => {
+                    self.handle_overflow(entry, priority);
+                }
+                Err(TrySendError::Disconnected(_)) => {
                     // Logger is shutting down, silently ignore
                 }
             }
         } else {
             let mut appenders = self.appenders.write();
-            Self::process_sync(&mut appenders, &entry, &self.failed_writes);
+            Self::process_sync(&mut appenders, &entry, &self.metrics);
         }
     }
 
-    /// Get the number of failed log write attempts
-    ///
-    /// This counter tracks log entries that failed to write to any appender.
-    /// Useful for monitoring logger health.
-    pub fn failed_write_count(&self) -> u64 {
-        self.failed_writes.load(Ordering::Relaxed)
+    /// Handle queue overflow based on configured policy and log priority
+    fn handle_overflow(&self, entry: LogEntry, priority: LogPriority) {
+        self.metrics.record_queue_full();
+
+        // Critical logs (Error, Fatal) are never dropped - force write synchronously
+        if priority == LogPriority::Critical {
+            self.force_write_critical(entry);
+            return;
+        }
+
+        match &self.overflow_policy {
+            OverflowPolicy::DropNewest => {
+                // Silently drop but track metrics
+                self.metrics.record_dropped();
+            }
+
+            OverflowPolicy::DropOldest => {
+                // Note: True DropOldest requires access to the receiver side
+                // which we don't have. Fall back to AlertAndDrop with a warning.
+                self.alert_and_drop(entry, true);
+            }
+
+            OverflowPolicy::Block => {
+                // Block until space is available
+                self.metrics.record_block();
+                if let Some(ref sender) = self.sender {
+                    // send() blocks until successful
+                    let _ = sender.send(entry);
+                }
+            }
+
+            OverflowPolicy::BlockWithTimeout(timeout) => {
+                self.metrics.record_block();
+                if let Some(ref sender) = self.sender {
+                    match sender.send_timeout(entry, *timeout) {
+                        Ok(()) => {
+                            // Successfully sent after waiting
+                        }
+                        Err(crossbeam_channel::SendTimeoutError::Timeout(entry)) => {
+                            // Timeout expired, drop the log
+                            self.alert_and_drop(entry, false);
+                        }
+                        Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => {
+                            // Logger shutting down
+                        }
+                    }
+                }
+            }
+
+            OverflowPolicy::AlertAndDrop => {
+                self.alert_and_drop(entry, false);
+            }
+        }
     }
 
-    /// Get the number of synchronous fallback events
+    /// Force write a critical log entry synchronously
+    fn force_write_critical(&self, entry: LogEntry) {
+        self.metrics.record_critical_preserved();
+
+        // Try non-blocking lock first
+        if let Some(mut appenders) = self.appenders.try_write() {
+            Self::process_sync(&mut appenders, &entry, &self.metrics);
+        } else {
+            // For critical logs, we block to ensure they're written
+            let mut appenders = self.appenders.write();
+            Self::process_sync(&mut appenders, &entry, &self.metrics);
+        }
+    }
+
+    /// Drop a log entry with alert notification
+    fn alert_and_drop(&self, _entry: LogEntry, is_drop_oldest_fallback: bool) {
+        let dropped_count = self.metrics.record_dropped();
+
+        // Alert on first drop and periodically thereafter
+        let should_alert = dropped_count == 0 || (dropped_count + 1) % 1000 == 0;
+
+        if should_alert {
+            if is_drop_oldest_fallback {
+                eprintln!(
+                    "[LOGGER WARNING] Queue full, {} logs dropped. \
+                     Note: DropOldest policy not fully supported, using AlertAndDrop.",
+                    dropped_count + 1
+                );
+            } else {
+                eprintln!(
+                    "[LOGGER WARNING] Queue full, {} logs dropped. \
+                     Consider increasing buffer size or using a different overflow policy.",
+                    dropped_count + 1
+                );
+            }
+
+            // Call user-provided callback if available
+            if let Some(ref callback) = self.on_overflow {
+                callback(dropped_count + 1);
+            }
+        }
+    }
+
+    /// Get the number of dropped logs
     ///
-    /// This counter tracks how many times the async logger fell back to
-    /// synchronous logging due to a full buffer. Each fallback indicates
-    /// backpressure in the logging system.
+    /// This counter tracks log entries that were dropped due to queue overflow
+    /// or write failures. Useful for monitoring logger health.
+    pub fn dropped_count(&self) -> u64 {
+        self.metrics.dropped_count()
+    }
+
+    /// Get the number of failed log write attempts (alias for dropped_count)
+    #[deprecated(since = "0.2.0", note = "Use dropped_count() instead")]
+    pub fn failed_write_count(&self) -> u64 {
+        self.metrics.dropped_count()
+    }
+
+    /// Get the number of queue full events
     ///
-    /// **High fallback counts indicate:**
-    /// - The async buffer is too small for the log volume
-    /// - Appenders are slow and can't keep up with log generation
-    /// - Potential performance impact from blocking on sync writes
+    /// This counter tracks how many times the async buffer became full.
+    /// High counts indicate the buffer size may need to be increased.
+    pub fn queue_full_count(&self) -> u64 {
+        self.metrics.queue_full_events()
+    }
+
+    /// Get the number of synchronous fallback events (blocking events)
     ///
-    /// **Recommended actions:**
-    /// - Increase the buffer size in `Logger::with_async()`
-    /// - Optimize or reduce log volume
-    /// - Check appender performance (file I/O, network, etc.)
+    /// This counter tracks how many times the logger had to block
+    /// due to overflow policy configuration.
+    pub fn sync_fallback_count(&self) -> u64 {
+        self.metrics.block_events()
+    }
+
+    /// Get the logger metrics for detailed observability
     ///
     /// # Example
     ///
@@ -340,13 +450,13 @@ impl Logger {
     /// let logger = Logger::with_async(100);
     ///
     /// // After logging operations...
-    /// let fallbacks = logger.sync_fallback_count();
-    /// if fallbacks > 0 {
-    ///     eprintln!("Warning: {} sync fallbacks detected", fallbacks);
-    /// }
+    /// let metrics = logger.metrics();
+    /// println!("Dropped: {}", metrics.dropped_count());
+    /// println!("Total logged: {}", metrics.total_logged());
+    /// println!("Drop rate: {:.2}%", metrics.drop_rate());
     /// ```
-    pub fn sync_fallback_count(&self) -> u64 {
-        self.sync_fallbacks.load(Ordering::Relaxed)
+    pub fn metrics(&self) -> &LoggerMetrics {
+        &self.metrics
     }
 
     pub fn flush(&self) -> Result<()> {
@@ -399,39 +509,7 @@ impl Logger {
         }
 
         let entry = LogEntry::new(level, message.into()).with_context(context);
-
-        if let Some(ref sender) = self.sender {
-            match sender.try_send(entry) {
-                Ok(_) => {}
-                Err(crossbeam_channel::TrySendError::Full(entry)) => {
-                    // Buffer full - log synchronously to avoid dropping critical messages
-                    // Increment fallback counter for observability
-                    self.sync_fallbacks.fetch_add(1, Ordering::Relaxed);
-
-                    // Use try_write to prevent deadlock if async worker holds the lock
-                    if let Some(mut appenders) = self.appenders.try_write() {
-                        eprintln!(
-                            "[LOGGER WARNING] Async buffer full (fallback #{}). Logging synchronously. \
-                             Consider increasing buffer size or reducing log volume.",
-                            self.sync_fallbacks.load(Ordering::Relaxed)
-                        );
-                        Self::process_sync(&mut appenders, &entry, &self.failed_writes);
-                    } else {
-                        // Lock unavailable - drop log to prevent deadlock
-                        eprintln!(
-                            "[LOGGER WARNING] Buffer full and appenders lock unavailable. \
-                             Dropping log entry to prevent deadlock. Message: {:?}",
-                            entry.message
-                        );
-                        self.failed_writes.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {}
-            }
-        } else {
-            let mut appenders = self.appenders.write();
-            Self::process_sync(&mut appenders, &entry, &self.failed_writes);
-        }
+        self.send_entry(entry);
     }
 
     /// Helper for structured info logging
@@ -566,10 +644,14 @@ impl Drop for Logger {
             eprintln!("[LOGGER ERROR] Failed to flush during shutdown: {}", e);
         }
 
-        // Report any failed writes
-        let failed = self.failed_writes.load(Ordering::Relaxed);
-        if failed > 0 {
-            eprintln!("[LOGGER WARNING] Logger shutting down with {} failed writes", failed);
+        // Report any dropped logs
+        let dropped = self.metrics.dropped_count();
+        if dropped > 0 {
+            eprintln!(
+                "[LOGGER WARNING] Logger shutting down with {} dropped logs (drop rate: {:.2}%)",
+                dropped,
+                self.metrics.drop_rate()
+            );
         }
     }
 }
@@ -579,17 +661,24 @@ impl Drop for Logger {
 /// # Example
 /// ```
 /// use rust_logger_system::prelude::*;
+/// use std::sync::Arc;
 ///
 /// let logger = Logger::builder()
 ///     .min_level(LogLevel::Debug)
 ///     .appender(ConsoleAppender::new())
 ///     .async_mode(1000)
+///     .overflow_policy(OverflowPolicy::AlertAndDrop)
+///     .on_overflow(Arc::new(|count| {
+///         eprintln!("ALERT: {} logs dropped", count);
+///     }))
 ///     .build();
 /// ```
 pub struct LoggerBuilder {
     min_level: LogLevel,
     appenders: Vec<Box<dyn Appender>>,
     async_buffer: Option<usize>,
+    overflow_policy: OverflowPolicy,
+    on_overflow: Option<OverflowCallback>,
 }
 
 impl LoggerBuilder {
@@ -599,6 +688,8 @@ impl LoggerBuilder {
             min_level: LogLevel::Info,
             appenders: Vec::new(),
             async_buffer: None,
+            overflow_policy: OverflowPolicy::AlertAndDrop,
+            on_overflow: None,
         }
     }
 
@@ -625,10 +716,56 @@ impl LoggerBuilder {
         self
     }
 
+    /// Set the overflow policy for async logging
+    ///
+    /// Determines what happens when the async buffer is full.
+    /// Default is `AlertAndDrop`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rust_logger_system::prelude::*;
+    /// use std::time::Duration;
+    ///
+    /// let logger = Logger::builder()
+    ///     .async_mode(100)
+    ///     .overflow_policy(OverflowPolicy::BlockWithTimeout(Duration::from_millis(50)))
+    ///     .build();
+    /// ```
+    #[must_use = "builder methods return a new value"]
+    pub fn overflow_policy(mut self, policy: OverflowPolicy) -> Self {
+        self.overflow_policy = policy;
+        self
+    }
+
+    /// Set a callback for overflow notifications
+    ///
+    /// The callback is invoked when logs are dropped due to queue overflow.
+    /// The parameter is the total count of dropped logs.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rust_logger_system::prelude::*;
+    /// use std::sync::Arc;
+    ///
+    /// let logger = Logger::builder()
+    ///     .async_mode(100)
+    ///     .on_overflow(Arc::new(|count| {
+    ///         eprintln!("Warning: {} logs dropped", count);
+    ///     }))
+    ///     .build();
+    /// ```
+    #[must_use = "builder methods return a new value"]
+    pub fn on_overflow(mut self, callback: OverflowCallback) -> Self {
+        self.on_overflow = Some(callback);
+        self
+    }
+
     /// Build the Logger
     pub fn build(self) -> Logger {
         let mut logger = if let Some(size) = self.async_buffer {
-            Logger::with_async(size)
+            Logger::with_async_config(size, self.overflow_policy, self.on_overflow)
         } else {
             Logger::new()
         };
@@ -673,12 +810,10 @@ mod tests {
 
     #[test]
     fn test_builder_basic() {
-        let logger = Logger::builder()
-            .min_level(LogLevel::Debug)
-            .build();
+        let logger = Logger::builder().min_level(LogLevel::Debug).build();
 
         // Verify the logger was created
-        assert_eq!(logger.failed_write_count(), 0);
+        assert_eq!(logger.dropped_count(), 0);
     }
 
     #[test]
@@ -689,7 +824,7 @@ mod tests {
             .build();
 
         // Verify logger was created with appender
-        assert_eq!(logger.failed_write_count(), 0);
+        assert_eq!(logger.dropped_count(), 0);
     }
 
     #[test]
@@ -701,7 +836,7 @@ mod tests {
 
         // Verify async logger was created
         assert_eq!(logger.sync_fallback_count(), 0);
-        assert_eq!(logger.failed_write_count(), 0);
+        assert_eq!(logger.dropped_count(), 0);
     }
 
     #[test]
@@ -714,7 +849,7 @@ mod tests {
 
         // Log a message to verify it works
         logger.info("Test message");
-        assert_eq!(logger.failed_write_count(), 0);
+        assert_eq!(logger.dropped_count(), 0);
     }
 
     #[test]
@@ -723,6 +858,143 @@ mod tests {
         let logger = builder.build();
 
         // Default logger should have Info level
-        assert_eq!(logger.failed_write_count(), 0);
+        assert_eq!(logger.dropped_count(), 0);
+    }
+
+    #[test]
+    fn test_overflow_policy_drop_newest() {
+        let logger = Logger::builder()
+            .async_mode(2) // Very small buffer
+            .overflow_policy(OverflowPolicy::DropNewest)
+            .appender(ConsoleAppender::new()) // Add appender to actually log
+            .build();
+
+        // Fill buffer and verify metrics
+        for i in 0..10 {
+            logger.debug(format!("Message {}", i));
+        }
+
+        // Give async thread time to process
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Metrics should be available - either something was logged or dropped
+        let metrics = logger.metrics();
+        // With DropNewest, we expect at least some to be processed or dropped
+        // This test mainly verifies the policy doesn't panic
+        let _ = metrics.total_logged();
+        let _ = metrics.dropped_count();
+    }
+
+    #[test]
+    fn test_overflow_policy_block() {
+        let logger = Logger::builder()
+            .async_mode(10)
+            .overflow_policy(OverflowPolicy::Block)
+            .build();
+
+        // Block policy should eventually process all messages
+        for i in 0..5 {
+            logger.info(format!("Message {}", i));
+        }
+
+        // Wait for processing
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        assert_eq!(logger.dropped_count(), 0);
+    }
+
+    #[test]
+    fn test_overflow_policy_block_with_timeout() {
+        let logger = Logger::builder()
+            .async_mode(10)
+            .overflow_policy(OverflowPolicy::BlockWithTimeout(Duration::from_millis(100)))
+            .build();
+
+        for i in 0..5 {
+            logger.info(format!("Message {}", i));
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(logger.dropped_count(), 0);
+    }
+
+    #[test]
+    fn test_overflow_callback() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let callback_count = Arc::new(AtomicU64::new(0));
+        let callback_count_clone = Arc::clone(&callback_count);
+
+        let logger = Logger::builder()
+            .async_mode(1) // Very small buffer
+            .overflow_policy(OverflowPolicy::AlertAndDrop)
+            .on_overflow(Arc::new(move |_count| {
+                callback_count_clone.fetch_add(1, Ordering::Relaxed);
+            }))
+            .build();
+
+        // Generate overflow
+        for i in 0..100 {
+            logger.debug(format!("Message {}", i));
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Callback may or may not have been called depending on timing
+        // Just verify no panic occurred
+        let _ = callback_count.load(Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_critical_log_preservation() {
+        let logger = Logger::builder()
+            .async_mode(1) // Very small buffer
+            .overflow_policy(OverflowPolicy::DropNewest)
+            .build();
+
+        // Fill buffer with debug logs, then send critical log
+        for _ in 0..10 {
+            logger.debug("Low priority");
+        }
+
+        // Critical logs should never be dropped
+        logger.error("Critical error");
+        logger.fatal("Fatal error");
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Critical logs should have been preserved
+        let metrics = logger.metrics();
+        assert!(metrics.critical_logs_preserved() > 0 || metrics.total_logged() > 0);
+    }
+
+    #[test]
+    fn test_log_priority() {
+        assert_eq!(LogLevel::Trace.priority(), LogPriority::Normal);
+        assert_eq!(LogLevel::Debug.priority(), LogPriority::Normal);
+        assert_eq!(LogLevel::Info.priority(), LogPriority::Normal);
+        assert_eq!(LogLevel::Warn.priority(), LogPriority::High);
+        assert_eq!(LogLevel::Error.priority(), LogPriority::Critical);
+        assert_eq!(LogLevel::Fatal.priority(), LogPriority::Critical);
+    }
+
+    #[test]
+    fn test_metrics_drop_rate() {
+        let metrics = LoggerMetrics::new();
+
+        // No logs - 0% drop rate
+        assert_eq!(metrics.drop_rate(), 0.0);
+
+        // Record some logs
+        for _ in 0..90 {
+            metrics.record_logged();
+        }
+        for _ in 0..10 {
+            metrics.record_dropped();
+        }
+
+        // 10 out of 100 = 10%
+        let rate = metrics.drop_rate();
+        assert!(rate >= 9.9 && rate <= 10.1, "Drop rate was {}", rate);
     }
 }

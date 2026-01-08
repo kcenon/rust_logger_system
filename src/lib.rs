@@ -16,8 +16,14 @@ pub mod macros;
 
 pub mod prelude {
     pub use crate::appenders::{ConsoleAppender, FileAppender};
-    pub use crate::core::{Appender, LogEntry, LogLevel, Logger, LoggerBuilder, LoggerError, Result, DEFAULT_SHUTDOWN_TIMEOUT};
+    pub use crate::core::{
+        Appender, LogEntry, LogLevel, Logger, LoggerBuilder, LoggerError, LoggerMetrics,
+        LogPriority, OverflowCallback, OverflowPolicy, Result, DEFAULT_SHUTDOWN_TIMEOUT,
+    };
 }
 
-pub use core::{Appender, LogEntry, LogLevel, Logger, LoggerBuilder, LoggerError, Result, DEFAULT_SHUTDOWN_TIMEOUT};
 pub use appenders::{ConsoleAppender, FileAppender};
+pub use core::{
+    Appender, LogEntry, LogLevel, Logger, LoggerBuilder, LoggerError, LoggerMetrics, LogPriority,
+    OverflowCallback, OverflowPolicy, Result, DEFAULT_SHUTDOWN_TIMEOUT,
+};
