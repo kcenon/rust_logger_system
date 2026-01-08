@@ -20,6 +20,6 @@ pub use log_entry::LogEntry;
 pub use log_level::LogLevel;
 pub use logger::{Logger, LoggerBuilder, DEFAULT_SHUTDOWN_TIMEOUT};
 pub use metrics::LoggerMetrics;
-pub use overflow_policy::{LogPriority, OverflowCallback, OverflowPolicy};
+pub use overflow_policy::{LogPriority, OverflowCallback, OverflowPolicy, PriorityConfig};
 pub use structured_entry::{StructuredLogEntry, TracingContext};
 pub use timestamp::{FormatterConfig, TimestampFormat};

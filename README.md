@@ -174,6 +174,47 @@ println!("Drop rate: {:.2}%", metrics.drop_rate());
 
 **Note**: Critical logs (Error, Fatal) are **never dropped** regardless of overflow policy - they are force-written synchronously if the queue is full.
 
+### Priority-Based Log Preservation (v0.2.0+)
+
+Fine-tune how different log priorities are handled during queue overflow:
+
+```rust
+use rust_logger_system::prelude::*;
+
+// Default configuration: preserve all critical and high priority logs
+let logger = Logger::builder()
+    .async_mode(100)
+    .priority_config(PriorityConfig::default())
+    .build();
+
+// Custom configuration for high-throughput scenarios
+let logger = Logger::builder()
+    .async_mode(100)
+    .priority_config(PriorityConfig {
+        preserve_critical: true,   // Error/Fatal always written synchronously
+        preserve_high: true,       // Warn logs get retry attempts
+        block_on_critical: true,   // Block thread for critical logs if needed
+        high_priority_retry_count: 5, // Retry Warn logs up to 5 times
+    })
+    .build();
+
+// Minimal overhead configuration (only protect critical logs)
+let logger = Logger::builder()
+    .async_mode(100)
+    .priority_config(PriorityConfig {
+        preserve_critical: true,
+        preserve_high: false,      // Don't retry Warn logs
+        block_on_critical: false,  // Non-blocking critical writes
+        high_priority_retry_count: 0,
+    })
+    .build();
+```
+
+**Priority Levels**:
+- **Critical** (Error, Fatal): Never dropped when `preserve_critical=true`
+- **High** (Warn): Retried before dropping when `preserve_high=true`
+- **Normal** (Trace, Debug, Info): Subject to overflow policy
+
 ## Performance
 
 ### Async Logging Performance
