@@ -17,15 +17,18 @@ pub mod macros;
 pub mod prelude {
     pub use crate::appenders::{ConsoleAppender, FileAppender};
     pub use crate::core::{
-        Appender, FormatterConfig, LogEntry, LogLevel, Logger, LoggerBuilder, LoggerError,
-        LoggerMetrics, LogPriority, OverflowCallback, OverflowPolicy, PriorityConfig, Result,
-        TimestampFormat, DEFAULT_SHUTDOWN_TIMEOUT,
+        Appender, ContextGuard, FieldValue, FormatterConfig, LogContext, LogEntry, LogLevel,
+        Logger, LoggerBuilder, LoggerContext, LoggerError, LoggerMetrics, LogPriority,
+        OutputFormat, OverflowCallback, OverflowPolicy, PriorityConfig, Result,
+        StructuredLogBuilder, StructuredLogEntry, TimestampFormat, TracingContext,
+        DEFAULT_SHUTDOWN_TIMEOUT,
     };
 }
 
 pub use appenders::{ConsoleAppender, FileAppender};
 pub use core::{
-    Appender, FormatterConfig, LogEntry, LogLevel, Logger, LoggerBuilder, LoggerError,
-    LoggerMetrics, LogPriority, OverflowCallback, OverflowPolicy, PriorityConfig, Result,
-    TimestampFormat, DEFAULT_SHUTDOWN_TIMEOUT,
+    Appender, ContextGuard, FieldValue, FormatterConfig, LogContext, LogEntry, LogLevel, Logger,
+    LoggerBuilder, LoggerContext, LoggerError, LoggerMetrics, LogPriority, OutputFormat,
+    OverflowCallback, OverflowPolicy, PriorityConfig, Result, StructuredLogBuilder,
+    StructuredLogEntry, TimestampFormat, TracingContext, DEFAULT_SHUTDOWN_TIMEOUT,
 };

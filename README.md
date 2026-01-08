@@ -30,6 +30,9 @@ This is a Rust implementation of the [logger_system](https://github.com/kcenon/l
 - **Priority-Based Preservation**: Critical logs (Error, Fatal) are never dropped (v0.2.0+)
 - **Logger Metrics**: Track dropped logs, queue full events, and drop rates (v0.2.0+)
 - **Log Rotation**: Multiple rotation strategies - Size, Time, Daily, Hourly, Hybrid (v0.2.1+)
+- **Structured Logging**: Type-safe fields with context propagation (v0.3.0+)
+- **Output Formats**: Text, JSON, and Logfmt output formats (v0.3.0+)
+- **Scoped Context**: RAII-based context management with automatic cleanup (v0.3.0+)
 
 ## Quick Start
 
@@ -266,6 +269,88 @@ let policy = RotationPolicy::new()
 - **Hourly**: Rotate every hour
 - **Hybrid**: Rotate on size OR time, whichever comes first
 - **Never**: Disable rotation (for external rotation management)
+
+### Structured Logging (v0.3.0+)
+
+Add type-safe fields to your log entries for better analysis and filtering:
+
+```rust
+use rust_logger_system::prelude::*;
+
+// Set persistent context fields (added to all logs)
+let logger = Logger::builder()
+    .appender(ConsoleAppender::new())
+    .build();
+
+logger.context().set("service", "api-gateway");
+logger.context().set("version", "1.2.3");
+
+// Use the structured log builder
+logger.info_builder()
+    .message("Request processed")
+    .field("user_id", 12345)
+    .field("latency_ms", 42.5)
+    .field("status", 200)
+    .log();
+
+// Or use LogContext directly
+let ctx = LogContext::new()
+    .with_field("request_id", "abc-123")
+    .with_field("method", "POST");
+logger.info_with_context("API call completed", ctx);
+```
+
+### Scoped Context (v0.3.0+)
+
+Use RAII guards for automatic context cleanup:
+
+```rust
+use rust_logger_system::prelude::*;
+
+let logger = Logger::new();
+
+// Context automatically removed when guard is dropped
+{
+    let _guard = logger.with_scoped_context("request_id", "req-456");
+    logger.info("Processing request");  // Includes request_id
+    logger.info("Validating input");    // Includes request_id
+}
+// request_id automatically removed here
+
+logger.info("Ready for next request");  // No request_id
+```
+
+### Output Formats (v0.3.0+)
+
+Choose between Text, JSON, and Logfmt output formats:
+
+```rust
+use rust_logger_system::prelude::*;
+
+// JSON format for log aggregation (ELK, Loki, etc.)
+let logger = Logger::builder()
+    .appender(ConsoleAppender::new().with_output_format(OutputFormat::Json))
+    .build();
+
+logger.info_builder()
+    .message("User logged in")
+    .field("user_id", 42)
+    .log();
+// Output: {"timestamp":"2025-01-08T10:30:45Z","level":"INFO","message":"User logged in","user_id":42}
+
+// Logfmt format (key=value pairs)
+let logger = Logger::builder()
+    .appender(ConsoleAppender::new().with_output_format(OutputFormat::Logfmt))
+    .build();
+
+logger.info("Server started");
+// Output: timestamp=2025-01-08T10:30:45Z level=INFO message="Server started"
+```
+
+**Available Output Formats**:
+- **Text** (default): Human-readable format with optional colors
+- **Json**: Machine-readable JSON, compatible with log aggregation tools
+- **Logfmt**: Key=value format, simple and parseable
 
 ## Performance
 
