@@ -15,7 +15,7 @@ pub mod timestamp;
 pub use appender::Appender;
 pub use async_appender::AsyncAppender;
 pub use error::{LoggerError, Result};
-pub use log_context::{FieldValue, LogContext};
+pub use log_context::{ContextGuard, FieldValue, LogContext, LoggerContext};
 pub use log_entry::LogEntry;
 pub use log_level::LogLevel;
 pub use logger::{Logger, LoggerBuilder, DEFAULT_SHUTDOWN_TIMEOUT};

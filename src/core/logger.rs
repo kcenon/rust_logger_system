@@ -3,7 +3,7 @@
 use super::{
     appender::Appender,
     error::Result,
-    log_context::LogContext,
+    log_context::{ContextGuard, FieldValue, LogContext, LoggerContext},
     log_entry::LogEntry,
     log_level::LogLevel,
     metrics::LoggerMetrics,
@@ -34,6 +34,8 @@ pub struct Logger {
     on_overflow: Option<OverflowCallback>,
     /// Configuration for priority-based log preservation
     priority_config: PriorityConfig,
+    /// Persistent context fields added to all log entries
+    context: LoggerContext,
 }
 
 impl Logger {
@@ -48,6 +50,7 @@ impl Logger {
             overflow_policy: OverflowPolicy::AlertAndDrop,
             on_overflow: None,
             priority_config: PriorityConfig::default(),
+            context: LoggerContext::new(),
         }
     }
 
@@ -136,6 +139,7 @@ impl Logger {
             overflow_policy,
             on_overflow,
             priority_config,
+            context: LoggerContext::new(),
         }
     }
 
@@ -296,7 +300,15 @@ impl Logger {
             return;
         }
 
-        let entry = LogEntry::new(level, message.into());
+        let mut entry = LogEntry::new(level, message.into());
+
+        // Merge persistent context if present
+        if !self.context.is_empty() {
+            let mut log_context = entry.context.take().unwrap_or_default();
+            self.context.merge_into(&mut log_context);
+            entry.context = Some(log_context);
+        }
+
         self.send_entry(entry);
     }
 
@@ -554,6 +566,8 @@ impl Logger {
     }
 
     /// Log with structured context fields
+    ///
+    /// Entry-level context fields take priority over logger-level persistent fields.
     pub fn log_with_context(
         &self,
         level: LogLevel,
@@ -564,8 +578,66 @@ impl Logger {
             return;
         }
 
-        let entry = LogEntry::new(level, message.into()).with_context(context);
+        let mut merged_context = context;
+
+        // Merge persistent context (entry-level takes priority)
+        if !self.context.is_empty() {
+            self.context.merge_into(&mut merged_context);
+        }
+
+        let entry = LogEntry::new(level, message.into()).with_context(merged_context);
         self.send_entry(entry);
+    }
+
+    /// Get a reference to the logger's persistent context
+    ///
+    /// Use this to set fields that should be included in all log entries.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rust_logger_system::Logger;
+    ///
+    /// let logger = Logger::new();
+    /// logger.context().set("service", "api-gateway");
+    /// logger.context().set("version", "1.2.3");
+    ///
+    /// // All subsequent logs will include these fields
+    /// logger.info("Server started");
+    /// ```
+    pub fn context(&self) -> &LoggerContext {
+        &self.context
+    }
+
+    /// Add a scoped context field with automatic cleanup
+    ///
+    /// Returns a guard that removes the field when dropped.
+    /// This is useful for adding temporary context for a specific operation.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rust_logger_system::Logger;
+    ///
+    /// let logger = Logger::new();
+    ///
+    /// {
+    ///     let _guard = logger.with_scoped_context("request_id", "abc-123");
+    ///     logger.info("Processing request");  // Includes request_id
+    ///     logger.info("Request validated");   // Includes request_id
+    /// }
+    /// // request_id automatically removed here
+    ///
+    /// logger.info("Ready for next request");  // No request_id
+    /// ```
+    pub fn with_scoped_context<K, V>(&self, key: K, value: V) -> ContextGuard
+    where
+        K: Into<String>,
+        V: Into<FieldValue>,
+    {
+        let key_str = key.into();
+        self.context.set(key_str.clone(), value);
+        ContextGuard::new(self.context.inner_fields(), key_str)
     }
 
     /// Helper for structured info logging
