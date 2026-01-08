@@ -13,7 +13,7 @@ pub use console::ConsoleAppender;
 pub use file::FileAppender;
 pub use json::JsonAppender;
 pub use network::NetworkAppender;
-pub use rotating_file::{RotatingFileAppender, RotationPolicy};
+pub use rotating_file::{RotatingFileAppender, RotationPolicy, RotationStrategy};
 
 #[cfg(feature = "async-appenders")]
 pub use async_file::AsyncFileAppender;
