@@ -18,12 +18,13 @@ pub mod prelude {
     pub use crate::appenders::{ConsoleAppender, FileAppender};
     pub use crate::core::{
         Appender, LogEntry, LogLevel, Logger, LoggerBuilder, LoggerError, LoggerMetrics,
-        LogPriority, OverflowCallback, OverflowPolicy, Result, DEFAULT_SHUTDOWN_TIMEOUT,
+        LogPriority, OverflowCallback, OverflowPolicy, PriorityConfig, Result,
+        DEFAULT_SHUTDOWN_TIMEOUT,
     };
 }
 
 pub use appenders::{ConsoleAppender, FileAppender};
 pub use core::{
     Appender, LogEntry, LogLevel, Logger, LoggerBuilder, LoggerError, LoggerMetrics, LogPriority,
-    OverflowCallback, OverflowPolicy, Result, DEFAULT_SHUTDOWN_TIMEOUT,
+    OverflowCallback, OverflowPolicy, PriorityConfig, Result, DEFAULT_SHUTDOWN_TIMEOUT,
 };
