@@ -25,7 +25,7 @@ use std::time::Duration;
 /// // Block with timeout
 /// let policy = OverflowPolicy::BlockWithTimeout(Duration::from_millis(100));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum OverflowPolicy {
     /// Drop new logs when queue is full (current behavior)
     ///
@@ -56,13 +56,8 @@ pub enum OverflowPolicy {
     ///
     /// This is the recommended default. Logs are dropped when queue is full,
     /// but operators are alerted so they can take action.
+    #[default]
     AlertAndDrop,
-}
-
-impl Default for OverflowPolicy {
-    fn default() -> Self {
-        OverflowPolicy::AlertAndDrop
-    }
 }
 
 impl fmt::Display for OverflowPolicy {
@@ -81,20 +76,15 @@ impl fmt::Display for OverflowPolicy {
 ///
 /// Higher priority logs are preserved over lower priority ones
 /// when the queue is full.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum LogPriority {
     /// Normal priority (Trace, Debug, Info)
+    #[default]
     Normal = 0,
     /// High priority (Warn)
     High = 1,
     /// Critical priority (Error, Fatal) - never dropped
     Critical = 2,
-}
-
-impl Default for LogPriority {
-    fn default() -> Self {
-        LogPriority::Normal
-    }
 }
 
 impl fmt::Display for LogPriority {

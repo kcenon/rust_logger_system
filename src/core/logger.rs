@@ -386,7 +386,7 @@ impl Logger {
         let dropped_count = self.metrics.record_dropped();
 
         // Alert on first drop and periodically thereafter
-        let should_alert = dropped_count == 0 || (dropped_count + 1) % 1000 == 0;
+        let should_alert = dropped_count == 0 || (dropped_count + 1).is_multiple_of(1000);
 
         if should_alert {
             if is_drop_oldest_fallback {
@@ -995,6 +995,6 @@ mod tests {
 
         // 10 out of 100 = 10%
         let rate = metrics.drop_rate();
-        assert!(rate >= 9.9 && rate <= 10.1, "Drop rate was {}", rate);
+        assert!((9.9..=10.1).contains(&rate), "Drop rate was {}", rate);
     }
 }
