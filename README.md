@@ -33,6 +33,7 @@ This is a Rust implementation of the [logger_system](https://github.com/kcenon/l
 - **Structured Logging**: Type-safe fields with context propagation (v0.3.0+)
 - **Output Formats**: Text, JSON, and Logfmt output formats (v0.3.0+)
 - **Scoped Context**: RAII-based context management with automatic cleanup (v0.3.0+)
+- **Log Sampling**: Configurable sampling for high-volume scenarios (v0.4.0+)
 
 ## Quick Start
 
@@ -351,6 +352,53 @@ logger.info("Server started");
 - **Text** (default): Human-readable format with optional colors
 - **Json**: Machine-readable JSON, compatible with log aggregation tools
 - **Logfmt**: Key=value format, simple and parseable
+
+### Log Sampling (v0.4.0+)
+
+Reduce log volume in high-throughput scenarios while ensuring critical logs are never dropped:
+
+```rust
+use rust_logger_system::prelude::*;
+use std::collections::HashMap;
+
+// Simple 50% sampling
+let logger = Logger::builder()
+    .sample_rate(0.5)  // Log 50% of messages
+    .appender(ConsoleAppender::new())
+    .build();
+
+// Full configuration with category-specific rates
+let logger = Logger::builder()
+    .with_sampling(SamplingConfig {
+        rate: 0.1,  // Default: sample 10% of logs
+        always_sample: vec![LogLevel::Warn, LogLevel::Error, LogLevel::Fatal],
+        category_rates: {
+            let mut m = HashMap::new();
+            m.insert("database".to_string(), 0.01);   // 1% of DB logs
+            m.insert("security".to_string(), 1.0);    // 100% of security logs
+            m
+        },
+        adaptive: true,              // Enable adaptive sampling
+        adaptive_threshold: 50000,   // Threshold: 50k msgs/sec
+        adaptive_min_rate: 0.001,    // Never go below 0.1%
+    })
+    .build();
+
+// Check sampling metrics
+if let Some(sampler) = logger.sampler() {
+    let metrics = sampler.metrics();
+    println!("Sampled: {}", metrics.sampled_count());
+    println!("Dropped: {}", metrics.dropped_count());
+    println!("Effective rate: {:.2}%", sampler.effective_sample_rate() * 100.0);
+}
+```
+
+**Sampling Features**:
+- **Random Sampling**: Configurable rate (0.0 to 1.0)
+- **Always-Sample Levels**: Critical logs (Error, Fatal) never dropped by default
+- **Category-Based Rates**: Different rates for different log categories
+- **Adaptive Sampling**: Automatically reduces rate under high load
+- **Metrics**: Track sampled/dropped counts for observability
 
 ## Performance
 

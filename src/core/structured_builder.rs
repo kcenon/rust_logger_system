@@ -226,7 +226,7 @@ mod tests {
             .message("Multiple fields test")
             .field("string_field", "hello")
             .field("int_field", 42)
-            .field("float_field", 3.14)
+            .field("float_field", 42.5)
             .field("bool_field", true)
             .log();
     }

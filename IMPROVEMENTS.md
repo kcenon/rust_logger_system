@@ -517,52 +517,56 @@ logger.info_builder()
 **Previous Priority**: Low
 **Actual Effort**: 1 day
 
-### 5. Sampling for High-Volume Logs
+### 5. Sampling for High-Volume Logs ✅ RESOLVED
 
-**Suggestion**: Add log sampling to reduce volume while maintaining visibility:
+**Issue**: Need log sampling to reduce volume in high-throughput scenarios while ensuring critical logs are never dropped.
 
+**Status**: **RESOLVED** - Implemented in v0.4.0
+
+**Solution Implemented**:
+- Added `SamplingConfig` struct with configurable rate, always-sample levels, and category rates
+- Added `LogSampler` with random sampling and metrics tracking
+- Added `SamplerMetrics` for observability (sampled count, dropped count, effective rate)
+- Added `RateTracker` for adaptive sampling based on throughput
+- Integrated sampling into `Logger` and `LoggerBuilder` with `with_sampling()` and `sample_rate()` methods
+- Category-based sampling via "category" field in LogContext
+- Thread-local RNG to minimize contention
+
+**Usage Example**:
 ```rust
-// TODO: Add log sampling for high-volume scenarios
+use rust_logger_system::prelude::*;
+use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
-pub struct SamplingConfig {
-    pub rate: f64,           // Sample rate 0.0 to 1.0
-    pub always_sample: Vec<LogLevel>,  // Always log these levels
+// Simple 50% sampling
+let logger = Logger::builder()
+    .sample_rate(0.5)
+    .appender(ConsoleAppender::new())
+    .build();
+
+// Full configuration
+let logger = Logger::builder()
+    .with_sampling(SamplingConfig {
+        rate: 0.1,  // 10% of logs
+        always_sample: vec![LogLevel::Warn, LogLevel::Error, LogLevel::Fatal],
+        category_rates: {
+            let mut m = HashMap::new();
+            m.insert("database".to_string(), 0.01);  // 1% of DB logs
+            m
+        },
+        adaptive: true,
+        adaptive_threshold: 50000,
+        adaptive_min_rate: 0.001,
+    })
+    .build();
+
+// Check metrics
+if let Some(sampler) = logger.sampler() {
+    println!("Effective rate: {:.2}%", sampler.effective_sample_rate() * 100.0);
 }
-
-impl Logger {
-    pub fn should_sample(&self, record: &LogRecord) -> bool {
-        // Always sample configured levels
-        if self.config.sampling.always_sample.contains(&record.level) {
-            return true;
-        }
-
-        // Probabilistic sampling
-        rand::random::<f64>() < self.config.sampling.rate
-    }
-
-    pub fn log(&self, record: LogRecord) {
-        if !self.should_sample(&record) {
-            self.metrics.sampled_logs.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-
-        // ... actual logging
-    }
-}
-
-// Usage:
-let logger = Logger::with_config(LoggerConfig {
-    sampling: SamplingConfig {
-        rate: 0.1,  // Sample 10% of logs
-        always_sample: vec![LogLevel::Error, LogLevel::Fatal],  // Always log errors
-    },
-    // ... other config
-});
 ```
 
-**Priority**: Low
-**Estimated Effort**: Small (2-3 days)
+**Previous Priority**: Low
+**Actual Effort**: Small (1 day)
 
 ## Testing Requirements
 
@@ -705,10 +709,10 @@ let logger = Logger::with_config(LoggerConfig {
 - [ ] Add operations guide
 
 ### Phase 4: Advanced Features (Sprint 4) - In Progress
-- [ ] Add log sampling
+- [x] Add log sampling (SamplingConfig, LogSampler, SamplerMetrics, RateTracker)
 - [x] Implement context propagation (LoggerContext, ContextGuard, StructuredLogBuilder)
 - [x] Add output formats (Text, Json, Logfmt)
-- [ ] Add performance benchmarks
+- [x] Add performance benchmarks (sampling benchmarks added)
 - [ ] Create advanced examples
 
 ## Breaking Changes
@@ -747,5 +751,5 @@ let logger = Logger::with_config(LoggerConfig {
 
 ---
 
-*Improvement Plan Version 1.0*
-*Last Updated: 2025-10-17*
+*Improvement Plan Version 1.1*
+*Last Updated: 2026-01-08*

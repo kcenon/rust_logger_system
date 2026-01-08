@@ -524,3 +524,218 @@ fn test_multiple_appenders_different_formats() {
         .parse()
         .expect("Second file should have numeric timestamp");
 }
+
+// ============================================================================
+// Log Sampling Tests
+// ============================================================================
+
+#[test]
+fn test_sampling_basic() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let log_file = temp_dir.path().join("sampling_basic.log");
+
+    let mut logger = Logger::builder()
+        .sample_rate(0.5) // Sample 50%
+        .build();
+    logger.set_min_level(LogLevel::Info);
+
+    let appender = FileAppender::new(log_file.to_str().unwrap()).expect("Failed to create appender");
+    logger.add_appender(Box::new(appender));
+
+    // Log many messages
+    for i in 0..1000 {
+        logger.info(format!("Message {}", i));
+    }
+
+    logger.flush().expect("Failed to flush");
+
+    // Check sampling metrics
+    let sampler = logger.sampler().expect("Sampler should be configured");
+    let metrics = sampler.metrics();
+
+    // Should have sampled approximately 50% (with some tolerance)
+    let rate = sampler.effective_sample_rate();
+    assert!(
+        (0.40..=0.60).contains(&rate),
+        "Expected ~50% sample rate, got {:.2}%",
+        rate * 100.0
+    );
+
+    // Verify the log file has approximately 50% of messages
+    let content = fs::read_to_string(&log_file).expect("Failed to read log file");
+    let lines: Vec<&str> = content.lines().collect();
+    let line_count = lines.len();
+
+    assert!(
+        (400..=600).contains(&line_count),
+        "Expected ~500 log entries, got {}",
+        line_count
+    );
+
+    // Total should equal sampled + dropped
+    assert_eq!(
+        metrics.sampled_count() + metrics.dropped_count(),
+        metrics.total_count(),
+        "Total should equal sampled + dropped"
+    );
+}
+
+#[test]
+fn test_sampling_always_sample_critical() {
+    use rust_logger_system::SamplingConfig;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let log_file = temp_dir.path().join("sampling_critical.log");
+
+    // Configure sampling to drop everything except Error/Fatal
+    let config = SamplingConfig::new(0.0) // Drop all
+        .with_always_sample(vec![LogLevel::Error, LogLevel::Fatal]);
+
+    let mut logger = Logger::builder()
+        .with_sampling(config)
+        .build();
+    logger.set_min_level(LogLevel::Debug);
+
+    let appender = FileAppender::new(log_file.to_str().unwrap()).expect("Failed to create appender");
+    logger.add_appender(Box::new(appender));
+
+    // Log at different levels
+    for _ in 0..100 {
+        logger.debug("Debug message");
+        logger.info("Info message");
+        logger.warn("Warn message");
+    }
+    for _ in 0..10 {
+        logger.error("Error message");
+        logger.fatal("Fatal message");
+    }
+
+    logger.flush().expect("Failed to flush");
+
+    // Verify only Error and Fatal messages were logged
+    let content = fs::read_to_string(&log_file).expect("Failed to read log file");
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Should have exactly 20 lines (10 error + 10 fatal)
+    assert_eq!(
+        lines.len(),
+        20,
+        "Should have only Error and Fatal messages, got {}",
+        lines.len()
+    );
+
+    assert!(!content.contains("Debug message"));
+    assert!(!content.contains("Info message"));
+    assert!(!content.contains("Warn message"));
+    assert!(content.contains("Error message"));
+    assert!(content.contains("Fatal message"));
+}
+
+#[test]
+fn test_sampling_category_rates() {
+    use rust_logger_system::SamplingConfig;
+    use rust_logger_system::LogContext;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let log_file = temp_dir.path().join("sampling_category.log");
+
+    // Configure different rates for different categories
+    let config = SamplingConfig::new(1.0) // Log all by default
+        .with_category_rate("noisy", 0.0); // Drop all "noisy" category logs
+
+    let mut logger = Logger::builder()
+        .with_sampling(config)
+        .build();
+    logger.set_min_level(LogLevel::Info);
+
+    let appender = FileAppender::new(log_file.to_str().unwrap()).expect("Failed to create appender");
+    logger.add_appender(Box::new(appender));
+
+    // Log with different categories
+    for i in 0..50 {
+        let normal_ctx = LogContext::new().with_field("category", "normal");
+        let noisy_ctx = LogContext::new().with_field("category", "noisy");
+
+        logger.log_with_context(LogLevel::Info, format!("Normal {}", i), normal_ctx);
+        logger.log_with_context(LogLevel::Info, format!("Noisy {}", i), noisy_ctx);
+    }
+
+    logger.flush().expect("Failed to flush");
+
+    // Verify only "normal" category messages were logged
+    let content = fs::read_to_string(&log_file).expect("Failed to read log file");
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Should have exactly 50 lines (only normal category)
+    assert_eq!(
+        lines.len(),
+        50,
+        "Should have only 'normal' category messages, got {}",
+        lines.len()
+    );
+
+    assert!(content.contains("Normal"));
+    assert!(!content.contains("Noisy"));
+}
+
+#[test]
+fn test_sampling_with_async_logging() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let log_file = temp_dir.path().join("sampling_async.log");
+
+    let mut logger = Logger::builder()
+        .sample_rate(0.5)
+        .async_mode(100)
+        .build();
+    logger.set_min_level(LogLevel::Info);
+
+    let appender = FileAppender::new(log_file.to_str().unwrap()).expect("Failed to create appender");
+    logger.add_appender(Box::new(appender));
+
+    // Log many messages
+    for i in 0..500 {
+        logger.info(format!("Async message {}", i));
+    }
+
+    // Give async worker time to process
+    std::thread::sleep(Duration::from_millis(300));
+    logger.flush().expect("Failed to flush");
+
+    // Check sampling metrics
+    let sampler = logger.sampler().expect("Sampler should be configured");
+    let rate = sampler.effective_sample_rate();
+
+    assert!(
+        (0.40..=0.60).contains(&rate),
+        "Expected ~50% sample rate in async mode, got {:.2}%",
+        rate * 100.0
+    );
+}
+
+#[test]
+fn test_sampling_no_sampler() {
+    // Test that logger without sampling works normally
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let log_file = temp_dir.path().join("no_sampling.log");
+
+    let mut logger = Logger::builder().build(); // No sampling configured
+    logger.set_min_level(LogLevel::Info);
+
+    let appender = FileAppender::new(log_file.to_str().unwrap()).expect("Failed to create appender");
+    logger.add_appender(Box::new(appender));
+
+    // Log messages
+    for i in 0..100 {
+        logger.info(format!("Message {}", i));
+    }
+
+    logger.flush().expect("Failed to flush");
+
+    // Verify sampler is None
+    assert!(logger.sampler().is_none(), "Sampler should be None");
+
+    // Verify all messages were logged
+    let content = fs::read_to_string(&log_file).expect("Failed to read log file");
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 100, "All messages should be logged without sampling");
+}

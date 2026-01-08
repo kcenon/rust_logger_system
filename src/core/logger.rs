@@ -8,6 +8,7 @@ use super::{
     log_level::LogLevel,
     metrics::LoggerMetrics,
     overflow_policy::{LogPriority, OverflowCallback, OverflowPolicy, PriorityConfig},
+    sampling::{LogSampler, SamplingConfig},
 };
 use crossbeam_channel::{bounded, Sender, TrySendError};
 use parking_lot::RwLock;
@@ -36,6 +37,8 @@ pub struct Logger {
     priority_config: PriorityConfig,
     /// Persistent context fields added to all log entries
     context: LoggerContext,
+    /// Optional sampler for high-volume log filtering
+    sampler: Option<LogSampler>,
 }
 
 impl Logger {
@@ -51,6 +54,7 @@ impl Logger {
             on_overflow: None,
             priority_config: PriorityConfig::default(),
             context: LoggerContext::new(),
+            sampler: None,
         }
     }
 
@@ -140,6 +144,7 @@ impl Logger {
             on_overflow,
             priority_config,
             context: LoggerContext::new(),
+            sampler: None,
         }
     }
 
@@ -298,6 +303,15 @@ impl Logger {
     pub fn log(&self, level: LogLevel, message: impl Into<String>) {
         if level < *self.min_level.read() {
             return;
+        }
+
+        // Apply sampling if configured
+        if let Some(ref sampler) = self.sampler {
+            // Extract category from context if available (will be set after context merge)
+            // For now, use None as category since we don't have context yet
+            if !sampler.should_sample(level, None) {
+                return;
+            }
         }
 
         let mut entry = LogEntry::new(level, message.into());
@@ -527,6 +541,37 @@ impl Logger {
         &self.metrics
     }
 
+    /// Get a reference to the log sampler, if configured
+    ///
+    /// Returns `None` if sampling is not enabled.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rust_logger_system::{Logger, SamplingConfig};
+    /// use std::sync::atomic::Ordering;
+    ///
+    /// let logger = Logger::builder()
+    ///     .with_sampling(SamplingConfig::new(0.5))
+    ///     .build();
+    ///
+    /// // Log some messages
+    /// for _ in 0..100 {
+    ///     logger.info("Test message");
+    /// }
+    ///
+    /// // Check sampling metrics
+    /// if let Some(sampler) = logger.sampler() {
+    ///     let metrics = sampler.metrics();
+    ///     println!("Sampled: {}", metrics.sampled_count());
+    ///     println!("Dropped: {}", metrics.dropped_count());
+    ///     println!("Effective rate: {:.2}%", sampler.effective_sample_rate() * 100.0);
+    /// }
+    /// ```
+    pub fn sampler(&self) -> Option<&LogSampler> {
+        self.sampler.as_ref()
+    }
+
     pub fn flush(&self) -> Result<()> {
         let mut appenders = self.appenders.write();
         for appender in appenders.iter_mut() {
@@ -568,6 +613,8 @@ impl Logger {
     /// Log with structured context fields
     ///
     /// Entry-level context fields take priority over logger-level persistent fields.
+    /// If sampling is enabled and the context contains a "category" field,
+    /// category-specific sampling rates will be applied.
     pub fn log_with_context(
         &self,
         level: LogLevel,
@@ -576,6 +623,22 @@ impl Logger {
     ) {
         if level < *self.min_level.read() {
             return;
+        }
+
+        // Apply sampling if configured
+        if let Some(ref sampler) = self.sampler {
+            // Extract category from context for category-specific sampling
+            let category = context.fields().get("category").and_then(|v| {
+                if let super::log_context::FieldValue::String(s) = v {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            });
+
+            if !sampler.should_sample(level, category) {
+                return;
+            }
         }
 
         let mut merged_context = context;
@@ -808,6 +871,7 @@ pub struct LoggerBuilder {
     overflow_policy: OverflowPolicy,
     on_overflow: Option<OverflowCallback>,
     priority_config: PriorityConfig,
+    sampling_config: Option<SamplingConfig>,
 }
 
 impl LoggerBuilder {
@@ -820,6 +884,7 @@ impl LoggerBuilder {
             overflow_policy: OverflowPolicy::AlertAndDrop,
             on_overflow: None,
             priority_config: PriorityConfig::default(),
+            sampling_config: None,
         }
     }
 
@@ -917,6 +982,58 @@ impl LoggerBuilder {
         self
     }
 
+    /// Configure log sampling for high-volume scenarios
+    ///
+    /// Sampling reduces log volume by only logging a percentage of messages,
+    /// while ensuring critical logs (Error, Fatal) are never dropped.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rust_logger_system::prelude::*;
+    /// use std::collections::HashMap;
+    ///
+    /// let logger = Logger::builder()
+    ///     .with_sampling(SamplingConfig {
+    ///         rate: 0.1,  // Sample 10% of logs
+    ///         always_sample: vec![LogLevel::Warn, LogLevel::Error, LogLevel::Fatal],
+    ///         category_rates: HashMap::new(),
+    ///         adaptive: true,
+    ///         adaptive_threshold: 50000,
+    ///         adaptive_min_rate: 0.001,
+    ///     })
+    ///     .build();
+    /// ```
+    #[must_use = "builder methods return a new value"]
+    pub fn with_sampling(mut self, config: SamplingConfig) -> Self {
+        self.sampling_config = Some(config);
+        self
+    }
+
+    /// Configure a simple sample rate
+    ///
+    /// This is a convenience method for common sampling configurations.
+    /// Uses the default always_sample levels (Error, Fatal).
+    ///
+    /// # Arguments
+    ///
+    /// * `rate` - Sample rate between 0.0 and 1.0 (e.g., 0.1 = 10%)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rust_logger_system::Logger;
+    ///
+    /// let logger = Logger::builder()
+    ///     .sample_rate(0.5)  // Sample 50% of logs
+    ///     .build();
+    /// ```
+    #[must_use = "builder methods return a new value"]
+    pub fn sample_rate(mut self, rate: f64) -> Self {
+        self.sampling_config = Some(SamplingConfig::new(rate));
+        self
+    }
+
     /// Build the Logger
     pub fn build(self) -> Logger {
         let mut logger = if let Some(size) = self.async_buffer {
@@ -935,6 +1052,11 @@ impl LoggerBuilder {
         logger.set_min_level(self.min_level);
         for appender in self.appenders {
             logger.add_appender(appender);
+        }
+
+        // Configure sampling if enabled
+        if let Some(config) = self.sampling_config {
+            logger.sampler = Some(LogSampler::new(config));
         }
 
         logger

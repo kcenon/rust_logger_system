@@ -222,6 +222,138 @@ fn bench_level_filtering(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Sampling Benchmarks
+// ============================================================================
+
+fn bench_sampling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sampling");
+    group.throughput(Throughput::Elements(1));
+
+    // No sampling (baseline)
+    let mut logger_no_sampling = Logger::builder().build();
+    logger_no_sampling.set_min_level(LogLevel::Info);
+
+    group.bench_function("no_sampling", |b| {
+        b.iter(|| {
+            logger_no_sampling.info(black_box("Message without sampling"));
+        });
+    });
+
+    // 50% sampling
+    let mut logger_50pct = Logger::builder().sample_rate(0.5).build();
+    logger_50pct.set_min_level(LogLevel::Info);
+
+    group.bench_function("50pct_sampling", |b| {
+        b.iter(|| {
+            logger_50pct.info(black_box("Message with 50% sampling"));
+        });
+    });
+
+    // 10% sampling
+    let mut logger_10pct = Logger::builder().sample_rate(0.1).build();
+    logger_10pct.set_min_level(LogLevel::Info);
+
+    group.bench_function("10pct_sampling", |b| {
+        b.iter(|| {
+            logger_10pct.info(black_box("Message with 10% sampling"));
+        });
+    });
+
+    // Always-sample level (Error should always be logged)
+    let mut logger_critical = Logger::builder()
+        .with_sampling(SamplingConfig::new(0.0)) // Drop all except critical
+        .build();
+    logger_critical.set_min_level(LogLevel::Info);
+
+    group.bench_function("always_sample_critical", |b| {
+        b.iter(|| {
+            logger_critical.error(black_box("Error message - always sampled"));
+        });
+    });
+
+    group.bench_function("dropped_by_sampling", |b| {
+        b.iter(|| {
+            logger_critical.info(black_box("Info message - dropped by sampling"));
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_sampling_overhead(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sampling_overhead");
+    group.throughput(Throughput::Elements(100));
+
+    // Measure overhead of sampling vs no sampling for 100 messages
+    group.bench_function("100_messages_no_sampling", |b| {
+        let mut logger = Logger::builder().build();
+        logger.set_min_level(LogLevel::Info);
+
+        b.iter(|| {
+            for i in 0..100 {
+                logger.info(black_box(format!("Message {}", i)));
+            }
+        });
+    });
+
+    group.bench_function("100_messages_with_100pct_sampling", |b| {
+        let mut logger = Logger::builder().sample_rate(1.0).build();
+        logger.set_min_level(LogLevel::Info);
+
+        b.iter(|| {
+            for i in 0..100 {
+                logger.info(black_box(format!("Message {}", i)));
+            }
+        });
+    });
+
+    group.bench_function("100_messages_with_50pct_sampling", |b| {
+        let mut logger = Logger::builder().sample_rate(0.5).build();
+        logger.set_min_level(LogLevel::Info);
+
+        b.iter(|| {
+            for i in 0..100 {
+                logger.info(black_box(format!("Message {}", i)));
+            }
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_sampler_direct(c: &mut Criterion) {
+    use rust_logger_system::LogSampler;
+
+    let mut group = c.benchmark_group("sampler_direct");
+    group.throughput(Throughput::Elements(1));
+
+    let sampler = LogSampler::new(SamplingConfig::new(0.5));
+
+    group.bench_function("should_sample_info", |b| {
+        b.iter(|| {
+            let result = sampler.should_sample(black_box(LogLevel::Info), None);
+            black_box(result)
+        });
+    });
+
+    group.bench_function("should_sample_error", |b| {
+        b.iter(|| {
+            let result = sampler.should_sample(black_box(LogLevel::Error), None);
+            black_box(result)
+        });
+    });
+
+    group.bench_function("should_sample_with_category", |b| {
+        b.iter(|| {
+            let result = sampler.should_sample(black_box(LogLevel::Info), Some("database"));
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
+// ============================================================================
 // Criterion Configuration
 // ============================================================================
 
@@ -233,7 +365,10 @@ criterion_group!(
     bench_concurrent_logging,
     bench_log_entry_creation,
     bench_serialization,
-    bench_level_filtering
+    bench_level_filtering,
+    bench_sampling,
+    bench_sampling_overhead,
+    bench_sampler_direct
 );
 
 criterion_main!(benches);

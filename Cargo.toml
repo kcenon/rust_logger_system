@@ -35,6 +35,9 @@ flate2 = "1.0"  # For log compression
 async-trait = "0.1"
 tokio = { version = "1.42", features = ["fs", "io-util"], optional = true }
 
+# Random number generation (for sampling)
+rand = "0.8"
+
 [dev-dependencies]
 tokio = { version = "1.42", features = ["full"] }
 tokio-test = "0.4"
