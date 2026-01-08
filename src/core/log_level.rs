@@ -1,5 +1,6 @@
 //! Log level definitions
 
+use super::overflow_policy::LogPriority;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -44,6 +45,29 @@ impl LogLevel {
             LogLevel::Warn => Yellow,
             LogLevel::Error => Red,
             LogLevel::Fatal => BrightRed,
+        }
+    }
+
+    /// Get the priority level for overflow handling
+    ///
+    /// Critical logs (Error, Fatal) should never be dropped.
+    /// High priority logs (Warn) are preserved when possible.
+    /// Normal logs (Trace, Debug, Info) may be dropped under pressure.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rust_logger_system::{LogLevel, LogPriority};
+    ///
+    /// assert_eq!(LogLevel::Debug.priority(), LogPriority::Normal);
+    /// assert_eq!(LogLevel::Warn.priority(), LogPriority::High);
+    /// assert_eq!(LogLevel::Error.priority(), LogPriority::Critical);
+    /// ```
+    pub fn priority(&self) -> LogPriority {
+        match self {
+            LogLevel::Trace | LogLevel::Debug | LogLevel::Info => LogPriority::Normal,
+            LogLevel::Warn => LogPriority::High,
+            LogLevel::Error | LogLevel::Fatal => LogPriority::Critical,
         }
     }
 }
