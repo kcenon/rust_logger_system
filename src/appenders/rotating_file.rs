@@ -3,6 +3,7 @@
 use crate::core::appender::Appender;
 use crate::core::error::{LoggerError, Result};
 use crate::core::log_entry::LogEntry;
+use crate::core::timestamp::TimestampFormat;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -65,6 +66,8 @@ pub struct RotatingFileAppender {
     current_size: u64,
     /// Counter for consecutive deletion failures (reset on successful deletion)
     deletion_failure_count: usize,
+    /// Timestamp format for log entries
+    timestamp_format: TimestampFormat,
 }
 
 impl RotatingFileAppender {
@@ -121,7 +124,33 @@ impl RotatingFileAppender {
             writer,
             current_size,
             deletion_failure_count: 0,
+            timestamp_format: TimestampFormat::default(),
         })
+    }
+
+    /// Set the timestamp format for this appender
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use rust_logger_system::appenders::RotatingFileAppender;
+    /// use rust_logger_system::TimestampFormat;
+    ///
+    /// let appender = RotatingFileAppender::new("/var/log/app.log")
+    ///     .unwrap()
+    ///     .with_timestamp_format(TimestampFormat::UnixMillis);
+    /// ```
+    #[must_use]
+    pub fn with_timestamp_format(mut self, format: TimestampFormat) -> Self {
+        self.timestamp_format = format;
+        self
+    }
+
+    /// Set a custom timestamp format using a strftime-compatible format string
+    #[must_use]
+    pub fn with_custom_timestamp(mut self, format_str: &str) -> Self {
+        self.timestamp_format = TimestampFormat::Custom(format_str.to_string());
+        self
     }
 
     /// Check if rotation is needed
@@ -472,12 +501,8 @@ impl Appender for RotatingFileAppender {
         }
 
         // Format and write entry
-        let formatted = format!(
-            "[{}] [{}] {}\n",
-            entry.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),
-            entry.level,
-            entry.message
-        );
+        let timestamp_str = self.timestamp_format.format(&entry.timestamp);
+        let formatted = format!("[{}] [{}] {}\n", timestamp_str, entry.level, entry.message);
 
         let bytes_written = formatted.len() as u64;
 
