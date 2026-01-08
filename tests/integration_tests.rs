@@ -76,12 +76,17 @@ fn test_async_logging() {
 
 #[test]
 fn test_async_backpressure() {
-    // Test that when async buffer is full, logger falls back to sync logging
+    // Test that when async buffer is full with Block policy, all messages are logged
+    use rust_logger_system::OverflowPolicy;
+
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let log_file = temp_dir.path().join("backpressure_test.log");
 
-    // Small buffer to trigger backpressure
-    let mut logger = Logger::with_async(5);
+    // Small buffer with Block policy to ensure no messages are dropped
+    let mut logger = Logger::builder()
+        .async_mode(5)
+        .overflow_policy(OverflowPolicy::Block) // Block ensures all messages are logged
+        .build();
     logger.set_min_level(LogLevel::Info);
 
     let appender = FileAppender::new(log_file.to_str().unwrap()).expect("Failed to create appender");
@@ -97,10 +102,10 @@ fn test_async_backpressure() {
 
     logger.flush().expect("Failed to flush");
 
-    // Verify all messages were logged (either async or sync fallback)
+    // Verify all messages were logged (Block policy ensures no drops)
     let content = fs::read_to_string(&log_file).expect("Failed to read log file");
     let lines: Vec<&str> = content.lines().collect();
-    assert_eq!(lines.len(), 20, "All messages should be logged despite backpressure");
+    assert_eq!(lines.len(), 20, "All messages should be logged with Block policy");
 }
 
 #[test]
@@ -135,9 +140,9 @@ fn test_error_tracking() {
         logger.info("Test message");
     }
 
-    // Verify failed writes are tracked
-    let failed_count = logger.failed_write_count();
-    assert_eq!(failed_count, 5, "Should track all failed writes");
+    // Verify dropped logs are tracked
+    let dropped_count = logger.dropped_count();
+    assert_eq!(dropped_count, 5, "Should track all dropped logs");
 }
 
 #[test]
