@@ -6,12 +6,15 @@
 //! - Error tracking
 //! - Structured logging
 //! - Thread safety
+//! - Timestamp format support
 
 use rust_logger_system::appenders::file::FileAppender;
+use rust_logger_system::appenders::json::JsonAppender;
 use rust_logger_system::appenders::Appender;
 use rust_logger_system::core::log_context::LogContext;
 use rust_logger_system::core::log_level::LogLevel;
 use rust_logger_system::core::logger::Logger;
+use rust_logger_system::core::timestamp::TimestampFormat;
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
@@ -324,4 +327,200 @@ fn test_graceful_shutdown() {
     let content = fs::read_to_string(&log_file).expect("Failed to read log file");
     let lines: Vec<&str> = content.lines().collect();
     assert_eq!(lines.len(), 10, "All messages should be written before shutdown");
+}
+
+#[test]
+fn test_timestamp_format_iso8601() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let log_file = temp_dir.path().join("timestamp_iso8601.log");
+
+    let mut logger = Logger::new();
+    logger.set_min_level(LogLevel::Info);
+
+    let appender = FileAppender::new(log_file.to_str().unwrap())
+        .expect("Failed to create appender")
+        .with_timestamp_format(TimestampFormat::Iso8601);
+    logger.add_appender(Box::new(appender));
+
+    logger.info("Test ISO 8601 format");
+    logger.flush().expect("Failed to flush");
+
+    let content = fs::read_to_string(&log_file).expect("Failed to read log file");
+
+    // ISO 8601 format: 2025-01-08T10:30:45.123Z
+    assert!(content.contains('T'), "Should contain 'T' separator");
+    assert!(content.contains('Z'), "Should end with 'Z' for UTC");
+}
+
+#[test]
+fn test_timestamp_format_unix_millis() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let log_file = temp_dir.path().join("timestamp_unix.log");
+
+    let mut logger = Logger::new();
+    logger.set_min_level(LogLevel::Info);
+
+    let appender = FileAppender::new(log_file.to_str().unwrap())
+        .expect("Failed to create appender")
+        .with_timestamp_format(TimestampFormat::UnixMillis);
+    logger.add_appender(Box::new(appender));
+
+    logger.info("Test Unix millis format");
+    logger.flush().expect("Failed to flush");
+
+    let content = fs::read_to_string(&log_file).expect("Failed to read log file");
+
+    // Unix millis should be a long number
+    // Extract timestamp from format: [timestamp] [level] ...
+    let timestamp_str = content
+        .split('[')
+        .nth(1)
+        .and_then(|s| s.split(']').next())
+        .expect("Failed to extract timestamp");
+
+    // Should be parseable as a number
+    let timestamp: i64 = timestamp_str.parse().expect("Should be a valid number");
+    assert!(timestamp > 1_000_000_000_000, "Should be Unix millis (13+ digits)");
+}
+
+#[test]
+fn test_timestamp_format_custom() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let log_file = temp_dir.path().join("timestamp_custom.log");
+
+    let mut logger = Logger::new();
+    logger.set_min_level(LogLevel::Info);
+
+    let appender = FileAppender::new(log_file.to_str().unwrap())
+        .expect("Failed to create appender")
+        .with_custom_timestamp("%Y/%m/%d %H:%M");
+    logger.add_appender(Box::new(appender));
+
+    logger.info("Test custom format");
+    logger.flush().expect("Failed to flush");
+
+    let content = fs::read_to_string(&log_file).expect("Failed to read log file");
+
+    // Custom format: YYYY/MM/DD HH:MM
+    // Extract timestamp from format: [timestamp] [level] ...
+    let timestamp_str = content
+        .split('[')
+        .nth(1)
+        .and_then(|s| s.split(']').next())
+        .expect("Failed to extract timestamp");
+
+    // Timestamp should contain date separators '/' and not 'T'
+    assert!(
+        timestamp_str.contains('/'),
+        "Should contain date separators in timestamp"
+    );
+    assert!(
+        !timestamp_str.contains('T'),
+        "Timestamp should not have ISO 8601 'T' separator"
+    );
+}
+
+#[test]
+fn test_json_appender_timestamp_format() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let log_file = temp_dir.path().join("timestamp_json.jsonl");
+
+    let mut logger = Logger::new();
+    logger.set_min_level(LogLevel::Info);
+
+    // Test ISO 8601 format in JSON (should be a string)
+    let appender = JsonAppender::new(log_file.to_str().unwrap())
+        .expect("Failed to create appender")
+        .with_timestamp_format(TimestampFormat::Iso8601);
+    logger.add_appender(Box::new(appender));
+
+    logger.info("Test JSON timestamp");
+    logger.flush().expect("Failed to flush");
+
+    let content = fs::read_to_string(&log_file).expect("Failed to read log file");
+    let json: serde_json::Value = serde_json::from_str(&content).expect("Invalid JSON");
+
+    // Timestamp should be a string for ISO 8601
+    assert!(json["timestamp"].is_string(), "Timestamp should be a string");
+    let timestamp_str = json["timestamp"].as_str().unwrap();
+    assert!(
+        timestamp_str.ends_with('Z'),
+        "ISO 8601 should end with 'Z'"
+    );
+}
+
+#[test]
+fn test_json_appender_unix_timestamp() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let log_file = temp_dir.path().join("timestamp_json_unix.jsonl");
+
+    let mut logger = Logger::new();
+    logger.set_min_level(LogLevel::Info);
+
+    // Test Unix millis format in JSON (should be a number)
+    let appender = JsonAppender::new(log_file.to_str().unwrap())
+        .expect("Failed to create appender")
+        .with_timestamp_format(TimestampFormat::UnixMillis);
+    logger.add_appender(Box::new(appender));
+
+    logger.info("Test JSON Unix timestamp");
+    logger.flush().expect("Failed to flush");
+
+    let content = fs::read_to_string(&log_file).expect("Failed to read log file");
+    let json: serde_json::Value = serde_json::from_str(&content).expect("Invalid JSON");
+
+    // Timestamp should be a number for Unix millis
+    assert!(
+        json["timestamp"].is_number(),
+        "Timestamp should be a number"
+    );
+    let timestamp = json["timestamp"].as_i64().unwrap();
+    assert!(
+        timestamp > 1_000_000_000_000,
+        "Should be Unix millis (13+ digits)"
+    );
+}
+
+#[test]
+fn test_multiple_appenders_different_formats() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let log_file1 = temp_dir.path().join("format1.log");
+    let log_file2 = temp_dir.path().join("format2.log");
+
+    let mut logger = Logger::new();
+    logger.set_min_level(LogLevel::Info);
+
+    // First appender with ISO 8601
+    let appender1 = FileAppender::new(log_file1.to_str().unwrap())
+        .expect("Failed to create appender")
+        .with_timestamp_format(TimestampFormat::Iso8601);
+
+    // Second appender with Unix millis
+    let appender2 = FileAppender::new(log_file2.to_str().unwrap())
+        .expect("Failed to create appender")
+        .with_timestamp_format(TimestampFormat::UnixMillis);
+
+    logger.add_appender(Box::new(appender1));
+    logger.add_appender(Box::new(appender2));
+
+    logger.info("Test multiple formats");
+    logger.flush().expect("Failed to flush");
+
+    // Verify first file has ISO 8601 format
+    let content1 = fs::read_to_string(&log_file1).expect("Failed to read log file 1");
+    assert!(
+        content1.contains('T') && content1.contains('Z'),
+        "First file should have ISO 8601 format"
+    );
+
+    // Verify second file has Unix millis format
+    let content2 = fs::read_to_string(&log_file2).expect("Failed to read log file 2");
+    let timestamp_str = content2
+        .split('[')
+        .nth(1)
+        .and_then(|s| s.split(']').next())
+        .expect("Failed to extract timestamp");
+    let _timestamp: i64 = timestamp_str
+        .parse()
+        .expect("Second file should have numeric timestamp");
 }

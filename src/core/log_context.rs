@@ -27,6 +27,22 @@ impl fmt::Display for FieldValue {
     }
 }
 
+impl FieldValue {
+    /// Convert to serde_json::Value for JSON serialization
+    #[must_use]
+    pub fn to_json_value(&self) -> serde_json::Value {
+        match self {
+            FieldValue::String(s) => serde_json::Value::String(s.clone()),
+            FieldValue::Int(i) => serde_json::Value::Number((*i).into()),
+            FieldValue::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            FieldValue::Bool(b) => serde_json::Value::Bool(*b),
+            FieldValue::Null => serde_json::Value::Null,
+        }
+    }
+}
+
 impl From<String> for FieldValue {
     fn from(s: String) -> Self {
         FieldValue::String(s)

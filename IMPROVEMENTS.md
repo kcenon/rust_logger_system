@@ -163,22 +163,19 @@ impl Logger {
 **Priority**: High
 **Estimated Effort**: Medium (1 week)
 
-### 2. Inconsistent Timestamp Formatting
+### 2. Inconsistent Timestamp Formatting ✅ RESOLVED
 
 **Issue**: Custom timestamp formats in log output are not validated or standardized, leading to parsing difficulties, inconsistent log analysis, and integration problems with log aggregation systems.
 
-**Location**: `src/formatter.rs:56`
+**Status**: **RESOLVED** - Implemented in `src/core/timestamp.rs`
 
-**Current Implementation**:
-```rust
-pub fn format_timestamp(&self, timestamp: &SystemTime) -> String {
-    // Basic ISO 8601 format, but not configurable or standardized
-    let datetime: DateTime<Utc> = (*timestamp).into();
-    datetime.format("%Y-%m-%d %H:%M:%S").to_string()
-}
-```
+**Solution Implemented**:
+- Added `TimestampFormat` enum with support for ISO 8601, RFC 3339, Unix timestamps, and custom formats
+- Added `FormatterConfig` struct for sharing formatting configuration
+- Updated all appenders (ConsoleAppender, FileAppender, RotatingFileAppender, JsonAppender) to support configurable timestamp formats
+- JSON output now supports both string and numeric timestamp formats based on configuration
 
-**Impact**:
+**Previous Impact** (now resolved):
 - Cannot customize timestamp format for different environments
 - Missing timezone information in some formats
 - Difficult to parse logs with automated tools
@@ -704,11 +701,11 @@ let logger = Logger::with_config(LoggerConfig {
 - [x] Test all overflow scenarios
 - [x] Add priority-based preservation (Critical logs never dropped)
 
-### Phase 2: Formatting and Standards (Sprint 2)
-- [ ] Add standard timestamp formats
-- [ ] Implement JSON output format
-- [ ] Add structured logging support
-- [ ] Update documentation
+### Phase 2: Formatting and Standards (Sprint 2) ✅ COMPLETED
+- [x] Add standard timestamp formats (TimestampFormat enum with Iso8601, Rfc3339, Unix variants)
+- [x] Implement JSON output format (JsonAppender with configurable timestamp)
+- [x] Add structured logging support (LogContext with FieldValue)
+- [x] Update documentation
 
 ### Phase 3: Production Features (Sprint 3)
 - [ ] Implement log rotation
