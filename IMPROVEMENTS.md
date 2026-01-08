@@ -697,11 +697,12 @@ let logger = Logger::with_config(LoggerConfig {
 
 ## Implementation Roadmap
 
-### Phase 1: Critical Reliability (Sprint 1)
-- [ ] Implement overflow policies
-- [ ] Add dropped log metrics
-- [ ] Add overflow alerts
-- [ ] Test all overflow scenarios
+### Phase 1: Critical Reliability (Sprint 1) ✅ COMPLETED
+- [x] Implement overflow policies (DropNewest, DropOldest, Block, BlockWithTimeout, AlertAndDrop)
+- [x] Add dropped log metrics (LoggerMetrics with dropped_count, total_logged, queue_full_events)
+- [x] Add overflow alerts (on_overflow callback and stderr warnings)
+- [x] Test all overflow scenarios
+- [x] Add priority-based preservation (Critical logs never dropped)
 
 ### Phase 2: Formatting and Standards (Sprint 2)
 - [ ] Add standard timestamp formats

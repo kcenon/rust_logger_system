@@ -26,6 +26,9 @@ This is a Rust implementation of the [logger_system](https://github.com/kcenon/l
 - **Inline Optimizations**: `#[inline]` hints on hot paths for better performance (v0.1.1+)
 - **Property Testing**: Robust validation using `proptest` (v0.1.1+)
 - **Benchmarking**: Performance tracking with `criterion` (v0.1.1+)
+- **Overflow Policies**: Configurable behavior when async queue is full (v0.2.0+)
+- **Priority-Based Preservation**: Critical logs (Error, Fatal) are never dropped (v0.2.0+)
+- **Logger Metrics**: Track dropped logs, queue full events, and drop rates (v0.2.0+)
 
 ## Quick Start
 
@@ -125,6 +128,51 @@ Available macros:
 - `warn!(logger, ...)` - Warning-level logging
 - `error!(logger, ...)` - Error-level logging
 - `fatal!(logger, ...)` - Fatal-level logging
+
+### Overflow Policies (v0.2.0+)
+
+Configure how the logger handles a full async queue:
+
+```rust
+use rust_logger_system::prelude::*;
+use std::sync::Arc;
+use std::time::Duration;
+
+// AlertAndDrop (default): Drop logs but alert operators
+let logger = Logger::builder()
+    .async_mode(1000)
+    .overflow_policy(OverflowPolicy::AlertAndDrop)
+    .on_overflow(Arc::new(|count| {
+        eprintln!("ALERT: {} logs dropped!", count);
+    }))
+    .build();
+
+// Block: Wait for queue space (use with caution)
+let logger = Logger::builder()
+    .async_mode(1000)
+    .overflow_policy(OverflowPolicy::Block)
+    .build();
+
+// BlockWithTimeout: Wait up to N ms, then drop
+let logger = Logger::builder()
+    .async_mode(1000)
+    .overflow_policy(OverflowPolicy::BlockWithTimeout(Duration::from_millis(100)))
+    .build();
+
+// DropNewest: Silently drop new logs (tracks metrics)
+let logger = Logger::builder()
+    .async_mode(1000)
+    .overflow_policy(OverflowPolicy::DropNewest)
+    .build();
+
+// Check metrics
+let metrics = logger.metrics();
+println!("Dropped: {}", metrics.dropped_count());
+println!("Total logged: {}", metrics.total_logged());
+println!("Drop rate: {:.2}%", metrics.drop_rate());
+```
+
+**Note**: Critical logs (Error, Fatal) are **never dropped** regardless of overflow policy - they are force-written synchronously if the queue is full.
 
 ## Performance
 
