@@ -9,6 +9,7 @@ pub mod log_level;
 pub mod logger;
 pub mod metrics;
 pub mod overflow_policy;
+pub mod structured_builder;
 pub mod structured_entry;
 pub mod timestamp;
 
@@ -21,5 +22,6 @@ pub use log_level::LogLevel;
 pub use logger::{Logger, LoggerBuilder, DEFAULT_SHUTDOWN_TIMEOUT};
 pub use metrics::LoggerMetrics;
 pub use overflow_policy::{LogPriority, OverflowCallback, OverflowPolicy, PriorityConfig};
+pub use structured_builder::StructuredLogBuilder;
 pub use structured_entry::{StructuredLogEntry, TracingContext};
 pub use timestamp::{FormatterConfig, TimestampFormat};
