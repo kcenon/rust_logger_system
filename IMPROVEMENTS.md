@@ -473,63 +473,49 @@ let appender = FileAppender::with_config(FileAppenderConfig {
 
 ## Additional Improvements
 
-### 4. Context and Structured Fields
+### 4. Context and Structured Fields ✅ RESOLVED
 
-**Suggestion**: Add support for structured logging with contextual fields:
+**Issue**: Need support for structured logging with contextual fields for better log analysis and filtering.
 
+**Status**: **RESOLVED** - Implemented in v0.3.0
+
+**Solution Implemented**:
+- Added `LoggerContext` for persistent logger-level fields (added to all logs)
+- Added `LogContext` for entry-level structured fields
+- Added `ContextGuard` for RAII-based scoped context with automatic cleanup
+- Added `StructuredLogBuilder` for fluent log entry construction
+- Added `OutputFormat` enum with Text, Json, and Logfmt formats
+- Entry-level fields take priority over logger-level fields
+
+**Usage Example**:
 ```rust
-// TODO: Add structured logging support
+use rust_logger_system::prelude::*;
 
-#[derive(Debug, Clone)]
-pub struct LogRecord {
-    pub level: LogLevel,
-    pub message: String,
-    pub timestamp: SystemTime,
-    pub fields: HashMap<String, serde_json::Value>,  // Structured fields
-    // ... other fields
+// Set persistent context
+let logger = Logger::builder()
+    .appender(ConsoleAppender::new().with_output_format(OutputFormat::Json))
+    .build();
+
+logger.context().set("service", "api-gateway");
+logger.context().set("version", "1.2.3");
+
+// Structured log builder
+logger.info_builder()
+    .message("Request processed")
+    .field("user_id", 12345)
+    .field("latency_ms", 42.5)
+    .log();
+
+// Scoped context (RAII)
+{
+    let _guard = logger.with_scoped_context("request_id", "abc-123");
+    logger.info("Processing");  // Includes request_id
 }
-
-impl Logger {
-    pub fn with_fields(&self, fields: HashMap<String, serde_json::Value>) -> LoggerContext {
-        LoggerContext {
-            logger: self,
-            fields,
-        }
-    }
-}
-
-pub struct LoggerContext<'a> {
-    logger: &'a Logger,
-    fields: HashMap<String, serde_json::Value>,
-}
-
-impl<'a> LoggerContext<'a> {
-    pub fn info(&self, message: &str) {
-        let mut record = LogRecord::new(LogLevel::Info, message);
-        record.fields = self.fields.clone();
-        self.logger.log(record);
-    }
-
-    pub fn with_field(mut self, key: &str, value: serde_json::Value) -> Self {
-        self.fields.insert(key.to_string(), value);
-        self
-    }
-}
-
-// Usage:
-logger
-    .with_fields(hashmap! {
-        "request_id" => json!("abc-123"),
-        "user_id" => json!(42),
-    })
-    .info("User logged in");
-
-// Output (JSON format):
-// {"timestamp":"2025-10-17T10:30:45Z","level":"INFO","message":"User logged in","request_id":"abc-123","user_id":42}
+// request_id automatically removed
 ```
 
-**Priority**: Low
-**Estimated Effort**: Medium (1 week)
+**Previous Priority**: Low
+**Actual Effort**: 1 day
 
 ### 5. Sampling for High-Volume Logs
 
@@ -718,9 +704,10 @@ let logger = Logger::with_config(LoggerConfig {
 - [x] Create rotation tests (comprehensive unit tests for all strategies)
 - [ ] Add operations guide
 
-### Phase 4: Advanced Features (Sprint 4)
+### Phase 4: Advanced Features (Sprint 4) - In Progress
 - [ ] Add log sampling
-- [ ] Implement context propagation
+- [x] Implement context propagation (LoggerContext, ContextGuard, StructuredLogBuilder)
+- [x] Add output formats (Text, Json, Logfmt)
 - [ ] Add performance benchmarks
 - [ ] Create advanced examples
 
